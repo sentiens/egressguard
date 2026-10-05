@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1 (2026-10-05)
+
+- The setup window builds under Homebrew: its state is an `ObservableObject`, not
+  `@State`, which newer SDKs implement as a macro that Homebrew's build cannot
+  load. 0.2.0 did not install from Homebrew on such SDKs.
+- CI builds the tree the way Homebrew does (`scripts/check-homebrew-build.sh`).
+
 ## 0.2.0 (2026-10-05)
 
 - A first install leaves EgressGuard off until the user sets it up: `setup` asks

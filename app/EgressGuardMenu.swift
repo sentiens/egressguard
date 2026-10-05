@@ -406,13 +406,21 @@ struct SettingsView: View {
 
 // MARK: - Setup
 
+/// What the user has decided in the setup window. (A class rather than @State:
+/// @State is a macro in newer SDKs, and Homebrew's build cannot load macro plugins.)
+final class SetupChoice: ObservableObject {
+    @Published var trustHere: Bool? // nil until the user decides about this network
+    @Published var turnedOn = false
+}
+
 /// The first-run window. EgressGuard is installed off; nothing is trusted and
 /// nothing is turned on until the user decides here.
 struct SetupView: View {
     @ObservedObject var model: SettingsModel
-    @State private var trustHere: Bool? // nil until the user decides about this network
-    @State private var turnedOn = false
+    @ObservedObject var choice: SetupChoice
     let close: () -> Void
+
+    var trustHere: Bool? { choice.trustHere }
 
     /// Whether this network will have direct internet once the switch is on.
     var trustedAfter: Bool { model.trustedNow != nil || trustHere == true }
@@ -427,7 +435,7 @@ struct SetupView: View {
             Text("EgressGuard lets this Mac reach the internet only on networks you trust, or through a VPN tunnel. "
                 + "It is off until you finish this.")
                 .fixedSize(horizontal: false, vertical: true)
-            if turnedOn { result } else { questions }
+            if choice.turnedOn { result } else { questions }
         }
         .padding(24)
         .frame(width: 520)
@@ -438,7 +446,7 @@ struct SetupView: View {
             VStack(alignment: .leading, spacing: 8) {
                 if let uplink = model.candidate {
                     Text("\(uplink.name) · router \(uplink.router) · \(uplink.mac ?? "")").font(.caption)
-                    Picker("", selection: $trustHere) {
+                    Picker("", selection: $choice.trustHere) {
                         Text("Trust it: direct internet here").tag(Bool?.some(true))
                         Text("Don't trust it: here, internet only through a VPN").tag(Bool?.some(false))
                     }
@@ -512,7 +520,7 @@ struct SetupView: View {
             model.saveError = error
             return
         }
-        turnedOn = true
+        choice.turnedOn = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak model] in model?.status = readStatus() }
     }
 }
@@ -644,7 +652,9 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 480),
                                   styleMask: [.titled, .closable], backing: .buffered, defer: false)
             window.title = "EgressGuard"
-            window.contentView = NSHostingView(rootView: SetupView(model: model) { [weak window] in window?.close() })
+            window.contentView = NSHostingView(rootView: SetupView(model: model, choice: SetupChoice()) { [weak window] in
+                window?.close()
+            })
             window.isReleasedWhenClosed = false
             window.delegate = self
             window.center()

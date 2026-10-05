@@ -20,5 +20,7 @@ jobs:
         run: go run github.com/kisielk/errcheck@v1.20.0 -asserts ./...
       - name: Build the binary and the menu bar app
         run: make GOTOOLCHAIN=auto
+      - name: Build as Homebrew does (its sandbox cannot load Swift macro plugins)
+        run: scripts/check-homebrew-build.sh
       - name: Stage an install
         run: make install PREFIX="$RUNNER_TEMP/stage" GOTOOLCHAIN=auto && "$RUNNER_TEMP/stage/bin/egressguard" version

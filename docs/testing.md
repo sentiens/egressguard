@@ -8,8 +8,8 @@ make test
 
 `make test` runs gofmt, go vet, shellcheck (when installed) and the Go tests with
 the race detector; CI adds staticcheck with every check on and errcheck (no
-error or type assertion goes unchecked), builds the menu bar app and stages an
-install.
+error or type assertion goes unchecked), builds the menu bar app, builds the tree
+the way Homebrew does (`scripts/check-homebrew-build.sh`) and stages an install.
 
 The tests run the daemon over a fake Mac (network tools, pf, clocks, the
 settings files), so every rule of the policy is exercised without root:
