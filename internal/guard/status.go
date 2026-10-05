@@ -23,26 +23,28 @@ const (
 
 // Status is status.json, read by the CLI and the menu bar app.
 type Status struct {
-	Anchor     string                `json:"anchor"`
-	Bridged    map[string]string     `json:"bridged"`
-	Enforced   bool                  `json:"enforced"`
-	Endpoints  []EndpointEntry       `json:"endpoints"`
-	Errors     []string              `json:"errors"`
-	Mode       string                `json:"mode"`
-	Networks   []string              `json:"networks"`
-	Note       *string               `json:"note"`
-	PowerWatch *bool                 `json:"power_watch"`
-	Release    string                `json:"release"`
-	Sealed     bool                  `json:"sealed"`
-	Settings   string                `json:"settings"`
-	State      string                `json:"state"`
-	Trusted    []TrustedEntry        `json:"trusted"`
-	Tunnel     *TunnelState          `json:"tunnel"`
-	Until      *int64                `json:"until"`
-	Updated    int64                 `json:"updated"`
-	Uplinks    map[string]StatusLink `json:"uplinks"`
-	Version    int                   `json:"version"`
-	VPNOnly    bool                  `json:"vpn_only"`
+	Anchor     string            `json:"anchor"`
+	Bridged    map[string]string `json:"bridged"`
+	Enforced   bool              `json:"enforced"`
+	Endpoints  []EndpointEntry   `json:"endpoints"`
+	Errors     []string          `json:"errors"`
+	Mode       string            `json:"mode"`
+	Networks   []string          `json:"networks"`
+	Note       *string           `json:"note"`
+	PowerWatch *bool             `json:"power_watch"`
+	Release    string            `json:"release"`
+	Sealed     bool              `json:"sealed"`
+	Settings   string            `json:"settings"`
+	// SetupPending: installed but not set up yet, so off until the user turns it on.
+	SetupPending bool                  `json:"setup_pending"`
+	State        string                `json:"state"`
+	Trusted      []TrustedEntry        `json:"trusted"`
+	Tunnel       *TunnelState          `json:"tunnel"`
+	Until        *int64                `json:"until"`
+	Updated      int64                 `json:"updated"`
+	Uplinks      map[string]StatusLink `json:"uplinks"`
+	Version      int                   `json:"version"`
+	VPNOnly      bool                  `json:"vpn_only"`
 }
 
 // StatusLink is an uplink with a router or trust; nil is unknown.
@@ -85,8 +87,9 @@ func (d *Daemon) status(control Control, view map[string]Link, trust bool, endpo
 		Anchor: Anchor, Bridged: map[string]string{}, Enforced: enforced, Endpoints: []EndpointEntry{},
 		Errors: append([]string{}, errs...), Mode: control.Mode, Networks: []string{}, Note: optional(control.Note),
 		PowerWatch: d.powerWatch, Release: Release, Sealed: d.sealed, Settings: SettingsPath(d.config),
-		State: StateOf(control, view, d.tunnel, trust), Trusted: []TrustedEntry{}, Tunnel: d.tunnel,
-		Until: control.Until, Uplinks: map[string]StatusLink{}, Version: StatusVersion, VPNOnly: d.config.VPNOnly,
+		SetupPending: control.SetupPending, State: StateOf(control, view, d.tunnel, trust),
+		Trusted: []TrustedEntry{}, Tunnel: d.tunnel, Until: control.Until, Uplinks: map[string]StatusLink{},
+		Version: StatusVersion, VPNOnly: d.config.VPNOnly,
 	}
 	for _, name := range sortedKeys(view) {
 		link := view[name]

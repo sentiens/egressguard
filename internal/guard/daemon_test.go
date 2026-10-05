@@ -568,3 +568,23 @@ func TestUncheckedTunnelReportedAndClosed(t *testing.T) {
 		t.Fatal(h.last().Errors)
 	}
 }
+
+func TestSetupPendingIsOffAndStillSeesTheNetwork(t *testing.T) {
+	h := newHarness(t)
+	h.mode(`{"mode": "off", "setup_pending": true}`)
+	h.expect(nil, StateOff)
+	status := h.last()
+	if !status.SetupPending || status.Mode != ModeOff || h.pf.current != "" {
+		t.Fatalf("%+v, rules %q", status, h.pf.current)
+	}
+	// The menu bar app offers to trust the network it is on: the daemon still reads it.
+	if link := status.Uplinks["en0"]; link.MAC == nil || *link.MAC != homeMAC {
+		t.Fatalf("%+v", status.Uplinks)
+	}
+	h.mode(`{"mode": "on"}`)
+	h.clocks.advance(1)
+	h.daemon.Step(nil)
+	if h.last().SetupPending || h.last().Mode != ModeOn {
+		t.Fatalf("%+v", h.last())
+	}
+}

@@ -1,6 +1,6 @@
 # egressguard: build, check and install. The Homebrew formula runs `make install PREFIX=…`.
 PREFIX  ?= /usr/local
-VERSION := 0.1.0
+VERSION := 0.2.0
 GO      ?= go
 SWIFTC  ?= swiftc
 BIN     := build/egressguard
@@ -14,7 +14,7 @@ export CGO_ENABLED := 1
 
 all: $(BIN) $(APP)
 
-$(BIN): $(SOURCES)
+$(BIN): $(SOURCES) Makefile # the version is set here
 	$(GO) build -trimpath -ldflags "-s -w -X github.com/sentiens/egressguard/internal/guard.Release=$(VERSION)" \
 		-o $@ ./cmd/egressguard
 

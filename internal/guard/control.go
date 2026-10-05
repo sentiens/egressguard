@@ -22,6 +22,9 @@ type Control struct {
 	Mode  string
 	Until *int64 // when a timed off or a lock ends (epoch seconds)
 	Note  string // why the file was not followed
+	// SetupPending is an off that setup wrote on a first install: the switch
+	// stays off until the user decides about this network and turns it on.
+	SetupPending bool
 }
 
 // ReadControl reads the control file at the wall-clock time now. Anything
@@ -44,6 +47,7 @@ func ReadControl(path string, now float64) Control {
 	if err != nil {
 		return Control{Mode: ModeOn, Note: "control file unreadable, treated as on"}
 	}
+	var isBool bool
 	mode, isText := value["mode"].(string)
 	if !isText {
 		return Control{Mode: ModeOn, Note: "control file has no mode, treated as on"}
@@ -57,7 +61,15 @@ func ReadControl(path string, now float64) Control {
 		}
 		until = &seconds
 	}
+	pending := false
+	if raw, present := value["setup_pending"]; present {
+		if pending, isBool = raw.(bool); !isBool {
+			return Control{Mode: ModeOn, Note: "control file has a bad setup_pending, treated as on"}
+		}
+	}
 	switch {
+	case pending && mode == ModeOff && until == nil:
+		return Control{Mode: ModeOff, SetupPending: true}
 	case mode == ModeOff && (until == nil || float64(*until) > now):
 		return Control{Mode: ModeOff, Until: until}
 	case mode == ModeLock && until != nil && now < float64(*until) && float64(*until) <= now+maxLock:

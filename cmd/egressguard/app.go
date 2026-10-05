@@ -23,6 +23,7 @@ type app struct {
 	stdout      io.Writer
 	configPath  string // the daemon's config.json: it names the control file
 	statusPath  string // the daemon's status.json
+	daemonPath  string // the daemon's installed binary: there on an update, not on a first install
 	executable  string // this binary, symlinks resolved
 	uplinks     func() (map[string]guard.Link, error)
 	home        func() (string, error) // the invoking user's home, also under sudo
@@ -30,6 +31,15 @@ type app struct {
 	confirm     time.Duration          // how long on and off wait for the daemon to follow
 	interactive bool                   // stdin is a terminal
 	outErr      error                  // the first failed write to stdout
+	answers     *prompter              // reads stdin; one per run, so no answer is buffered away
+}
+
+// prompter asks the user, on stdin and stdout.
+func (a *app) prompter() *prompter {
+	if a.answers == nil {
+		a.answers = newPrompter(a.stdin, a.stdout)
+	}
+	return a.answers
 }
 
 func newApp() (*app, error) {
@@ -46,6 +56,7 @@ func newApp() (*app, error) {
 		stdout:      os.Stdout,
 		configPath:  guard.StatePath("config.json"),
 		statusPath:  guard.StatePath("status.json"),
+		daemonPath:  guard.StatePath("egressguard"),
 		executable:  executable,
 		uplinks:     detectUplinks,
 		home:        userHome,
@@ -221,7 +232,7 @@ func (a *app) trustCurrent(name string, ask bool) error {
 		return nil
 	}
 	if ask {
-		answers := newPrompter(a.stdin, a.stdout)
+		answers := a.prompter()
 		question := fmt.Sprintf("Trust the network on %s (router %s, MAC %s)? [y/N] ", uplink, link.Router, link.MAC)
 		if yes, err := answers.yes(question); err != nil || !yes {
 			return err
@@ -408,6 +419,12 @@ func (a *app) restoreControl(previous map[string]any) error {
 func describe(status *statusFile) string {
 	var text string
 	switch status.State {
+	case guard.StateOff:
+		text = "off: any network, no protection"
+		if status.SetupPending {
+			text = "off: not set up yet. Finish the setup in the EgressGuard window (menu bar shield, Set up…),\n" +
+				"or: egressguard trust-current [name], then egressguard on"
+		}
 	case guard.StateTrusted:
 		var networks []string
 		for _, entry := range status.Trusted {
@@ -427,8 +444,6 @@ func describe(status *statusFile) string {
 		text = fmt.Sprintf("on, untrusted network: internet only through the tunnel (%s)", name)
 	case guard.StateBlocked:
 		text = "on, untrusted network and no tunnel: no internet"
-	case guard.StateOff:
-		text = "off: any network, no protection"
 	default:
 		text = status.State
 	}

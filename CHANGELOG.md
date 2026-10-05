@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0 (unreleased)
+
+- A first install leaves EgressGuard off until the user sets it up: `setup` asks
+  in the terminal, and otherwise the menu bar app opens a setup window that asks
+  whether to trust the current network and turns EgressGuard on only on request.
+  `control.json` and `status.json` carry `setup_pending` meanwhile.
+- Several prompts in one `setup` read the same input, so answers typed ahead are
+  no longer lost.
+
 ## 0.1.0 (2026-10-05)
 
 First release.

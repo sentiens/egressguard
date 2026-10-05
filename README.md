@@ -63,11 +63,17 @@ sudo egressguard setup          # installs the root daemon and the menu bar app
 `setup` copies the `egressguard` binary into `/Library/Application Support/EgressGuard`
 (root-owned: launchd never runs code from the Homebrew prefix, which your user
 can write to) and registers `com.sentiens.egressguard` with launchd, running
-`egressguard daemon`. It will not leave
-the Mac offline:
+`egressguard daemon`.
+
+**A first install leaves EgressGuard off.** `setup` asks in the terminal whether
+to trust the network you are on and whether to turn EgressGuard on. If you say
+no, or run it without a terminal, the menu bar shield opens a setup window that
+asks the same. No network is trusted and nothing is turned on without your
+answer; until then the shield says *Not set up yet*.
+
+It will not leave the Mac offline:
 
 - it needs the internet before it starts;
-- with no trusted network yet it offers to trust the current one;
 - it dry-runs the decision and installs with the switch **off** if this network
   is neither trusted nor tunnelled;
 - it checks the internet with the switch on and turns the switch off if that

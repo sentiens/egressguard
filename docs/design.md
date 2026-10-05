@@ -13,7 +13,7 @@ user's own files.
 | `config.json` (administrator) | same directory | root-owned, re-read on change |
 | `learned.json`, `status.json`, `pf-tokens`, `settings.last-good.json` | same directory | written by the daemon |
 | `settings.json` (trusted networks, endpoints, switches) | `~/Library/Application Support/EgressGuard/` | the user, through the settings window or `trust-current` |
-| `control.json` (`on`, `off`, `off` until, `lock` until) | same directory | the user, through the menu or the CLI |
+| `control.json` (`on`, `off`, `off` until, `lock` until; `off` with `setup_pending` after a first install) | same directory | the user, through the menu or the CLI; `setup` on a first install |
 | `egressguard` CLI | Homebrew `bin` | the user (`setup`, `uninstall`, `leaktest`: sudo) |
 | `EgressGuard.app` | Homebrew prefix, LaunchAgent `com.sentiens.egressguard-menu` | the user |
 
@@ -21,6 +21,13 @@ The daemon reads the user's files without following symlinks, only as regular
 files and up to a size limit, and validates every entry. Anything missing,
 stale or malformed in `control.json` means **on**. A bad `settings.json` keeps the
 last good settings and is reported in the status, the menu and the window.
+
+A first install leaves the switch off: `setup` writes `{"mode": "off",
+"setup_pending": true}` unless the user turned it on in the terminal, and the
+status reports `setup_pending`. The menu bar app then opens its setup window,
+which asks whether to trust the current network and turns the switch on only
+when the user says so. No network is trusted, and nothing is turned on, without
+an answer. An update leaves `control.json` alone.
 
 launchd never runs code from the Homebrew prefix: the user can write there.
 `setup` copies the binary into a root-owned directory, dry-runs that copy, and the

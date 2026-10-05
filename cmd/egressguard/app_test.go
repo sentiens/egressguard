@@ -33,6 +33,7 @@ func testApp(t *testing.T) (*app, *bytes.Buffer) {
 		stdout:     &out,
 		configPath: filepath.Join(dir, "daemon", "config.json"),
 		statusPath: filepath.Join(dir, "daemon", "status.json"),
+		daemonPath: filepath.Join(dir, "daemon", "egressguard"),
 		executable: filepath.Join(dir, "bin", "egressguard"),
 		uplinks: func() (map[string]guard.Link, error) {
 			return map[string]guard.Link{"en0": {Router: "192.168.1.1", MAC: homeMAC}, "en7": {Router: "10.0.0.1"}}, nil
@@ -559,5 +560,41 @@ func TestWatchLockNoticesALapse(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	if err := stop(); err == nil || !strings.Contains(err.Error(), "ended before") {
 		t.Fatal(err)
+	}
+}
+
+func TestOnboardTrustsAndTurnsOn(t *testing.T) {
+	a, out := testApp(t)
+	a.interactive, a.stdin = true, strings.NewReader("y\nHome\ny\n")
+	initial, err := a.onboard()
+	if err != nil || initial != "on" {
+		t.Fatal(initial, err)
+	}
+	if names := networkNames(t, readJSON(t, settingsPath(t, a))); !reflect.DeepEqual(names, []string{"Home"}) {
+		t.Fatal(names)
+	}
+	if !strings.Contains(out.String(), "Turn EgressGuard on now?") {
+		t.Fatal(out.String())
+	}
+}
+
+func TestOnboardStaysOffWithoutAYes(t *testing.T) {
+	for name, a := range map[string]*app{"no answers": nil, "not a terminal": nil} {
+		a, _ = testApp(t)
+		a.interactive = name == "no answers"
+		initial, err := a.onboard()
+		if err != nil || initial != "pending" {
+			t.Fatal(name, initial, err)
+		}
+		if settings, err := readUserJSON(settingsPath(t, a)); settings != nil || err != nil {
+			t.Fatal(name, "trusted without a yes:", settings, err)
+		}
+	}
+}
+
+func TestDescribeSetupPending(t *testing.T) {
+	status := &statusFile{Status: guard.Status{State: guard.StateOff, Mode: guard.ModeOff, SetupPending: true, Enforced: true}}
+	if text := describe(status); !strings.Contains(text, "not set up yet") || !strings.Contains(text, "egressguard on") {
+		t.Fatal(text)
 	}
 }

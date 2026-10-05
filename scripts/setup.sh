@@ -5,6 +5,8 @@
 #                        code from a prefix the user can write to (such as Homebrew's)
 #   EGRESSGUARD_CONFIG   the administrator config template
 #   EGRESSGUARD_APP      the menu bar app (may be empty)
+#   EGRESSGUARD_INITIAL  the switch on a first install: "pending" (off until the user
+#                        sets it up) or "on"; empty on an update, which leaves it alone
 # It refuses to leave the Mac offline: it needs the internet to start, dry-runs the
 # decision first, checks the internet with the switch on, and on any doubt turns the
 # switch off and flushes the rules.
@@ -12,6 +14,8 @@ set -euo pipefail
 
 [[ $(id -u) == 0 && -n ${SUDO_USER:-} && $SUDO_USER != root ]] || { echo "run it as: sudo egressguard setup" >&2; exit 2; }
 [[ -f ${EGRESSGUARD_DAEMON:-} && -f ${EGRESSGUARD_CONFIG:-} ]] || { echo "EGRESSGUARD_DAEMON and EGRESSGUARD_CONFIG must name files" >&2; exit 2; }
+readonly INITIAL=${EGRESSGUARD_INITIAL:-}
+[[ $INITIAL == "" || $INITIAL == pending || $INITIAL == on ]] || { echo "EGRESSGUARD_INITIAL must be pending, on or empty" >&2; exit 2; }
 
 readonly LABEL=com.sentiens.egressguard
 readonly MENU_LABEL=com.sentiens.egressguard-menu
@@ -141,8 +145,12 @@ if [[ $(field "$STAGE/check.json" syntax_ok) != true ]]; then
   exit 1
 fi
 state=$(field "$STAGE/check.json" state)
-echo "dry run: this network would be: $state"
-if [[ $state == blocked ]]; then
+echo "dry run: with the switch on, this network would be: $state"
+case $INITIAL in
+  pending) control '{"mode": "off", "setup_pending": true}' || { echo "the control file was not written" >&2; exit 1; } ;;
+  on) control '{"mode": "on"}' || { echo "the control file was not written" >&2; exit 1; } ;;
+esac
+if [[ $state == blocked && $INITIAL != pending ]]; then
   echo "this network is neither trusted nor tunnelled: installing with the switch OFF"
   echo "  trust it with: egressguard trust-current [name]   (or the menu bar shield, Settings…)"
   echo "  then: egressguard on"
@@ -180,5 +188,9 @@ sleep 1
 online || rollback "the internet check failed with the switch on"
 trap 'rm -rf "$STAGE"' EXIT
 echo "daemon installed: $(field "$DEST/status.json" state), anchor $ANCHOR, log $LOG"
+if [[ $INITIAL == pending ]]; then
+  echo "EgressGuard is OFF until you set it up: in the window the menu bar shield opens"
+  echo "  (or: egressguard trust-current [name], then egressguard on)"
+fi
 
 install_menu_app

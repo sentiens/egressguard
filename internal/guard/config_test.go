@@ -45,6 +45,23 @@ func TestControlOffAndExpiry(t *testing.T) {
 	}
 }
 
+func TestControlSetupPending(t *testing.T) {
+	if got := readControlText(t, ptr(`{"mode": "off", "setup_pending": true}`)); !reflect.DeepEqual(got,
+		Control{Mode: ModeOff, SetupPending: true}) {
+		t.Fatalf("%+v", got)
+	}
+	// Pending only qualifies an off for good: on, a timed off and false are not pending.
+	for _, text := range []string{`{"mode": "on", "setup_pending": true}`, `{"mode": "off", "until": 2000, "setup_pending": true}`,
+		`{"mode": "off", "setup_pending": false}`} {
+		if got := readControlText(t, &text); got.SetupPending {
+			t.Errorf("%s: %+v", text, got)
+		}
+	}
+	if got := readControlText(t, ptr(`{"mode": "off", "setup_pending": "yes"}`)); got.Mode != ModeOn || got.Note == "" {
+		t.Fatalf("%+v", got)
+	}
+}
+
 func TestControlLockIsBounded(t *testing.T) {
 	for text, want := range map[string]string{`{"mode": "lock", "until": 1030}`: ModeLock, `{"mode": "lock"}`: ModeOn,
 		`{"mode": "lock", "until": 999}`: ModeOn, `{"mode": "lock", "until": 1601}`: ModeOn} {

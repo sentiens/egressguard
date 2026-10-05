@@ -81,6 +81,7 @@ struct Status {
     var tunnel: String?
     var networks: [String] = []
     var sealed = false
+    var setupPending = false // installed, not set up yet: off until the user turns it on
     var enforced = true
     var stale = true
     var problems: [String] = []
@@ -103,6 +104,7 @@ func readStatus() -> Status {
     result.mode = json["mode"] as? String ?? "on"
     result.until = json["until"] as? Double
     result.sealed = json["sealed"] as? Bool ?? false
+    result.setupPending = json["setup_pending"] as? Bool ?? false
     result.enforced = json["enforced"] as? Bool ?? true
     if let tunnel = json["tunnel"] as? [String: Any] {
         let services = tunnel["services"] as? [String] ?? []
@@ -402,6 +404,129 @@ struct SettingsView: View {
     }
 }
 
+// MARK: - Setup
+
+/// The first-run window. EgressGuard is installed off; nothing is trusted and
+/// nothing is turned on until the user decides here.
+struct SetupView: View {
+    @ObservedObject var model: SettingsModel
+    @State private var trustHere: Bool? // nil until the user decides about this network
+    @State private var turnedOn = false
+    let close: () -> Void
+
+    /// Whether this network will have direct internet once the switch is on.
+    var trustedAfter: Bool { model.trustedNow != nil || trustHere == true }
+    var serversKnown: Int { model.vpnProfileCount + model.endpoints.count }
+    var mustDecide: Bool { model.candidate != nil && trustHere == nil }
+    /// Whether turning on now leaves this network without internet.
+    var cutsInternet: Bool { !mustDecide && !trustedAfter && model.status.tunnel == nil }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Set up EgressGuard").font(.title2).bold()
+            Text("EgressGuard lets this Mac reach the internet only on networks you trust, or through a VPN tunnel. "
+                + "It is off until you finish this.")
+                .fixedSize(horizontal: false, vertical: true)
+            if turnedOn { result } else { questions }
+        }
+        .padding(24)
+        .frame(width: 520)
+    }
+
+    @ViewBuilder var questions: some View {
+        GroupBox(label: Text("This network")) {
+            VStack(alignment: .leading, spacing: 8) {
+                if let uplink = model.candidate {
+                    Text("\(uplink.name) · router \(uplink.router) · \(uplink.mac ?? "")").font(.caption)
+                    Picker("", selection: $trustHere) {
+                        Text("Trust it: direct internet here").tag(Bool?.some(true))
+                        Text("Don't trust it: here, internet only through a VPN").tag(Bool?.some(false))
+                    }
+                    .pickerStyle(.radioGroup)
+                    .labelsHidden()
+                    if trustHere == true {
+                        TextField("Name, e.g. Home", text: $model.newName)
+                    }
+                    Text("Trust only networks you control, such as your home router.")
+                        .font(.caption).foregroundColor(.secondary)
+                } else if let uplink = model.trustedNow {
+                    Text("Already trusted: \(uplink.network ?? "")")
+                } else {
+                    Text("No network with a known router right now. You can trust one later in Settings.")
+                        .foregroundColor(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(6)
+        }
+        GroupBox(label: Text("VPN")) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("VPN servers EgressGuard knows: \(serversKnown)")
+                if serversKnown == 0 {
+                    Text("None yet: outside trusted networks there will be no internet. Add a VPN configuration "
+                        + "in macOS, or your server's address in Settings.")
+                        .font(.caption).foregroundColor(.orange).fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text("Outside trusted networks the Mac may reach only these servers, so your VPN can connect.")
+                        .font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(6)
+        }
+        if cutsInternet {
+            Text("⚠︎ This network is not trusted and no VPN is connected: turning EgressGuard on cuts the internet "
+                + "here until a VPN connects.")
+                .font(.caption).foregroundColor(.orange).fixedSize(horizontal: false, vertical: true)
+        }
+        if let error = model.saveError {
+            Text("⚠︎ " + error).font(.caption).foregroundColor(.red)
+        }
+        HStack {
+            Button("Later") { close() }
+            Spacer()
+            Button(cutsInternet ? "Turn on anyway" : "Turn on") { turnOn() }
+                .keyboardShortcut(.defaultAction)
+                .disabled(mustDecide)
+        }
+    }
+
+    @ViewBuilder var result: some View {
+        Text(model.status.setupPending || model.status.mode != "on"
+            ? "Turning on…" : "EgressGuard is on: \(stateLine(model.status))")
+        Text("The menu bar shield shows what it does; Settings… changes trusted networks and VPN servers.")
+            .font(.caption).foregroundColor(.secondary)
+        HStack {
+            Spacer()
+            Button("Done") { close() }.keyboardShortcut(.defaultAction)
+        }
+    }
+
+    func turnOn() {
+        model.saveError = nil
+        if trustHere == true {
+            model.trustCurrent()
+            if model.saveError != nil { return }
+        }
+        if let error = writeControl(["mode": "on"]) {
+            model.saveError = error
+            return
+        }
+        turnedOn = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak model] in model?.status = readStatus() }
+    }
+}
+
+/// The state of a status in words, for the menu and the setup window.
+func stateLine(_ status: Status) -> String {
+    switch status.state {
+    case "trusted": return "trusted network (\(status.networks.joined(separator: ", "))), direct internet"
+    case "tunnel": return "through the tunnel (\(status.tunnel ?? "?"))"
+    case "blocked": return "no internet until a VPN connects"
+    default: return status.state
+    }
+}
+
 // MARK: - Menu bar
 
 final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
@@ -410,6 +535,9 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var timer: Timer?
     var settingsWindow: NSWindow?
     var settingsModel: SettingsModel?
+    var setupWindow: NSWindow?
+    var setupModel: SettingsModel?
+    var setupOffered = false // the setup window opens by itself once per launch
     var controlError: String?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -431,6 +559,8 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         switch (status.stale, status.state) {
         case (true, _):
             symbol = "exclamationmark.shield"; line = "The EgressGuard daemon does not answer"
+        case (_, "off") where status.setupPending:
+            symbol = "exclamationmark.shield"; line = "Not set up yet · EgressGuard is off"
         case (_, "trusted"):
             let names = status.networks.joined(separator: ", ")
             symbol = "lock.shield"; line = "On · trusted network (\(names)), direct"
@@ -457,10 +587,16 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let error = controlError { menu.addItem(withTitle: "⚠︎ " + error, action: nil, keyEquivalent: "") }
         for problem in status.problems { menu.addItem(withTitle: "⚠︎ " + problem, action: nil, keyEquivalent: "") }
         menu.addItem(.separator())
-        if status.mode == "off" {
+        if !status.stale && status.setupPending {
+            add("Set up…", #selector(openSetup))
+            if !setupOffered {
+                setupOffered = true
+                openSetup()
+            }
+        } else if status.mode == "off" {
             add("Turn on", #selector(turnOn))
         }
-        if status.mode != "off" || status.until != nil {
+        if !status.setupPending && (status.mode != "off" || status.until != nil) {
             add("Turn off for 15 minutes", #selector(off15))
             add("Turn off for 1 hour", #selector(off60))
             add("Turn off until turned on", #selector(offForever))
@@ -502,9 +638,32 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         settingsWindow?.makeKeyAndOrderFront(nil)
     }
 
+    @objc func openSetup() {
+        if setupWindow == nil {
+            let model = SettingsModel()
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 480),
+                                  styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            window.title = "EgressGuard"
+            window.contentView = NSHostingView(rootView: SetupView(model: model) { [weak window] in window?.close() })
+            window.isReleasedWhenClosed = false
+            window.delegate = self
+            window.center()
+            (setupWindow, setupModel) = (window, model)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        setupWindow?.makeKeyAndOrderFront(nil)
+    }
+
     func windowWillClose(_ notification: Notification) {
-        settingsModel?.stop()
-        (settingsWindow, settingsModel) = (nil, nil) // a fresh model next time reads the file again
+        // A fresh model next time reads the files again.
+        if (notification.object as? NSWindow) === setupWindow {
+            setupModel?.stop()
+            (setupWindow, setupModel) = (nil, nil)
+            refresh()
+        } else {
+            settingsModel?.stop()
+            (settingsWindow, settingsModel) = (nil, nil)
+        }
     }
 
     @objc func turnOn() { control(["mode": "on"]) }
@@ -513,10 +672,8 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc func offForever() { off(minutes: nil) }
 }
 
-#if !EGRESSGUARD_PREVIEW // the preview build renders the settings window to a picture instead
 let app = NSApplication.shared
 let controller = Controller()
 app.delegate = controller
 app.setActivationPolicy(.accessory)
 app.run()
-#endif

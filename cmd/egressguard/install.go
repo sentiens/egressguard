@@ -64,6 +64,9 @@ func (a *app) menuApp() (string, error) {
 	return app, nil
 }
 
+// setup installs or updates the daemon. On a first install the switch stays off
+// until the user decides about this network and turns it on: here, in the menu
+// bar app's setup window, or with trust-current and on.
 func (a *app) setup() error {
 	if os.Geteuid() != 0 || sudoUser() == "" {
 		return errors.New("run it as: sudo egressguard setup")
@@ -75,6 +78,49 @@ func (a *app) setup() error {
 	menu, err := a.menuApp()
 	if err != nil {
 		return err
+	}
+	installed, err := exists(a.daemonPath)
+	if err != nil {
+		return err
+	}
+	initial := "" // an update leaves the switch as the user set it
+	if !installed {
+		if initial, err = a.onboard(); err != nil {
+			return err
+		}
+	} else if err := a.offerTrust(); err != nil {
+		return err
+	}
+	return a.runScript(script, "EGRESSGUARD_DAEMON="+a.executable, "EGRESSGUARD_CONFIG="+config,
+		"EGRESSGUARD_APP="+menu, "EGRESSGUARD_RELEASE="+guard.Release, "EGRESSGUARD_INITIAL="+initial)
+}
+
+// onboard asks, on a terminal, whether to trust this network and whether to turn
+// the switch on now. It returns the switch to install with: "on", or "pending"
+// (off until set up) when the user says no or no one is there to ask.
+func (a *app) onboard() (string, error) {
+	if !a.interactive {
+		return "pending", nil
+	}
+	a.printf("EgressGuard lets this Mac reach the internet only on networks you trust,\n" +
+		"or through a VPN tunnel. It stays off until you turn it on.\n\n")
+	if err := a.trustCurrent("", true); err != nil && !errors.As(err, new(exitStatus)) {
+		return "", err
+	}
+	on, err := a.prompter().yes("Turn EgressGuard on now? [y/N] ")
+	if err != nil {
+		return "", err
+	}
+	if !on {
+		return "pending", nil
+	}
+	return "on", nil
+}
+
+// offerTrust offers, on an update with no trusted network, to trust this one.
+func (a *app) offerTrust() error {
+	if !a.interactive {
+		return nil
 	}
 	path, err := a.settingsPath()
 	if err != nil {
@@ -88,14 +134,14 @@ func (a *app) setup() error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", path, err)
 	}
-	if len(networks) == 0 && a.interactive {
-		a.printf("No trusted network yet: on every network the internet would only go through a VPN tunnel.\n")
-		if err := a.trustCurrent("", true); err != nil && !errors.As(err, new(exitStatus)) {
-			return err
-		}
+	if len(networks) > 0 {
+		return nil
 	}
-	return a.runScript(script, "EGRESSGUARD_DAEMON="+a.executable, "EGRESSGUARD_CONFIG="+config,
-		"EGRESSGUARD_APP="+menu, "EGRESSGUARD_RELEASE="+guard.Release)
+	a.printf("No trusted network yet: on every network the internet would only go through a VPN tunnel.\n")
+	if err := a.trustCurrent("", true); err != nil && !errors.As(err, new(exitStatus)) {
+		return err
+	}
+	return nil
 }
 
 func (a *app) uninstall() error {
