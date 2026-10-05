@@ -160,6 +160,7 @@ fi
 install -d -o root -g wheel -m 0755 "$DEST"
 install -o root -g wheel -m 0755 "$STAGE/egressguard" "$DEST/egressguard"
 install -o root -g wheel -m 0644 "$STAGE/config.json" "$DEST/config.json"
+rm -f "$DEST/learned.json" # replaced by resolved.json in 0.3.0
 write_daemon_plist "$STAGE/$LABEL.plist"
 
 # From here a failure must not leave rules with nothing maintaining them.

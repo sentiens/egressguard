@@ -18,21 +18,21 @@ const StateDir = "/Library/Application Support/EgressGuard"
 func StatePath(name string) string { return StateDir + "/" + name }
 
 const (
-	learnServicesEvery = 60.0                   // seconds between scans of the VPN configurations
-	debounce           = 300 * time.Millisecond // lets a burst of joins settle
+	scanProfilesEvery = 60.0                   // seconds between scans of the VPN configurations
+	debounce          = 300 * time.Millisecond // lets a burst of joins settle
 )
 
 // NewSystem is the real Mac, with the daemon's files in StateDir.
-func NewSystem(learner EndpointSource) System {
+func NewSystem(profiles EndpointSource) System {
 	return System{
-		Filter:  NewPF(Run, StatePath("pf-tokens")),
-		Observe: func(config Config, refresh bool) (map[string]Link, error) { return Observe(config, refresh, Run, true) },
-		Tunnel:  func() (*TunnelState, error) { return TunnelStatus(Run) },
-		Learner: learner,
-		Wall:    wallClock,
-		Awake:   Uptime,
-		Asleep:  AsleepSeconds,
-		Idle:    func() (float64, error) { return HIDIdle(Run) },
+		Filter:   NewPF(Run, StatePath("pf-tokens")),
+		Observe:  func(config Config, refresh bool) (map[string]Link, error) { return Observe(config, refresh, Run, true) },
+		Tunnel:   func() (*TunnelState, error) { return TunnelStatus(Run) },
+		Profiles: profiles,
+		Wall:     wallClock,
+		Awake:    Uptime,
+		Asleep:   AsleepSeconds,
+		Idle:     func() (float64, error) { return HIDIdle(Run) },
 		Publish: func(status Status) {
 			if err := WriteStatus(StatePath("status.json"), status); err != nil {
 				logf("status not written: %v", err)
@@ -58,8 +58,8 @@ func RunDaemon() error {
 	if err != nil {
 		return err
 	}
-	learner := NewLearner(StatePath("learned.json"), Run, ResolveHost, BundleID)
-	d := NewDaemon(config, NewSystem(learner))
+	profiles := NewProfiles(StatePath("resolved.json"), Run, ResolveHost)
+	d := NewDaemon(config, NewSystem(profiles))
 	events := newQueue(d)
 	stop := make(chan struct{})
 	signals := make(chan os.Signal, 1)
@@ -79,7 +79,7 @@ func RunDaemon() error {
 		if first { // the first step closed every uplink; now watch
 			go watchRoutes(events.add, stop)
 			WatchPower(d.Seal, func() { events.add(&Event{Kind: EventWake}) }, d.SetPowerWatch)
-			go learn(d, learner, stop)
+			go scanProfiles(d, profiles, stop)
 		}
 		select {
 		case <-stop:
@@ -177,26 +177,18 @@ func (q *queue) onlyJoins() bool {
 	return len(q.events) > 0
 }
 
-// learn scans the VPN configurations every minute and tunnel connections every
-// tick, while learning is on.
-func learn(d *Daemon, learner *Learner, stop <-chan struct{}) {
-	lastServices := -learnServicesEvery
+// scanProfiles reads the VPN configurations macOS has every minute, while the
+// policy takes their servers; one that macOS did not answer is retried next tick.
+func scanProfiles(d *Daemon, profiles *Profiles, stop <-chan struct{}) {
+	last := -scanProfilesEvery
 	for {
-		uplinks, tunnel := d.Snapshot()
-		options := d.Config().Learn
-		trusted := len(trustedNames(uplinks)) > 0
-		now := wallClock()
-		if options.VPNServices && now-lastServices >= learnServicesEvery {
+		if now := wallClock(); d.Config().VPNConfigurations && now-last >= scanProfilesEvery {
+			uplinks, tunnel := d.Snapshot()
 			// Host names resolve only where DNS works: a trusted network or a tunnel.
-			if err := learner.ScanServices(trusted || tunnel != nil); err != nil {
-				logf("vpn configurations not read: %v", err) // tried again next tick
+			if err := profiles.Scan(len(trustedNames(uplinks)) > 0 || tunnel != nil); err != nil {
+				logf("vpn configurations not read: %v", err)
 			} else {
-				lastServices = now
-			}
-		}
-		if options.Connections && trusted {
-			if err := learner.ScanConnections(uplinks, tunnel, options.Processes, now); err != nil {
-				logf("connections not read: %v", err)
+				last = now
 			}
 		}
 		select {

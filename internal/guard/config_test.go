@@ -114,8 +114,8 @@ func TestNothingConfiguredIsValid(t *testing.T) {
 	if err != nil || len(config.TrustedNetworks)+len(config.Tunnels) != 0 {
 		t.Fatal(err, config)
 	}
-	if !reflect.DeepEqual(config.Learn, Learn{VPNServices: true, Processes: []string{}}) {
-		t.Fatalf("%+v", config.Learn)
+	if !config.VPNConfigurations {
+		t.Fatalf("%+v", config)
 	}
 }
 
@@ -163,8 +163,9 @@ func TestConfigRejected(t *testing.T) {
 		tunnel("1.2.3.4:65536/udp"),
 		tunnel("1.2.3.4:/udp"),
 		tunnel(5),
-		{"learn": map[string]any{"connections": "yes"}},
-		{"learn": map[string]any{"processes": []any{"/usr/bin/x"}}},
+		{"learn": map[string]any{"vpn_services": "yes"}},
+		{"learn": map[string]any{"connections": true}}, // removed in 0.3.0
+		{"learn": map[string]any{"processes": []any{"openvpn"}}},
 		{"learn": nil},
 		{"version": 1},
 		{"surprise": true},
@@ -201,9 +202,9 @@ func TestEndpoints(t *testing.T) {
 func TestEffective(t *testing.T) {
 	off := false
 	settings := Settings{TrustedNetworks: []Network{{Name: "mine", Interface: "en5"}}, Endpoints: vpnEndpoints[:1],
-		LearnConnections: &off}
+		VPNConfigurations: &off}
 	config := Effective(baseConfig, settings)
-	if len(config.TrustedNetworks) != 3 || config.Tunnels[1].Name != "own endpoints" || config.Learn.Connections {
+	if len(config.TrustedNetworks) != 3 || config.Tunnels[1].Name != "own endpoints" || config.VPNConfigurations {
 		t.Fatalf("%+v", config)
 	}
 	if len(baseConfig.TrustedNetworks) != 2 {

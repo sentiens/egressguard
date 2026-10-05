@@ -25,7 +25,7 @@ type System struct {
 	Filter     Filter
 	Observe    func(config Config, refresh bool) (map[string]Link, error)
 	Tunnel     func() (*TunnelState, error)
-	Learner    EndpointSource          // nil: nothing is learned
+	Profiles   EndpointSource          // the VPN configurations macOS has; nil: none
 	Wall       func() float64          // seconds since the epoch
 	Awake      func() float64          // seconds awake since boot; stops while the Mac sleeps
 	Asleep     func() float64          // seconds asleep since boot
@@ -401,8 +401,9 @@ func (d *Daemon) view() map[string]Link {
 	return view
 }
 
-// endpoints are the configured tunnels first, then the learned endpoints the
-// policy allows, one entry per endpoint with all its sources. Hold d.mu.
+// endpoints are the configured tunnels first, then the servers of the VPN
+// configurations macOS has if the policy takes them, one entry per endpoint with
+// all its sources. Hold d.mu.
 func (d *Daemon) endpoints() []Sourced {
 	var found []Sourced
 	for _, tunnel := range d.config.Tunnels {
@@ -410,14 +411,8 @@ func (d *Daemon) endpoints() []Sourced {
 			found = append(found, Sourced{endpoint, "config: " + tunnel.Name})
 		}
 	}
-	if d.sys.Learner != nil {
-		learn := d.config.Learn
-		for _, item := range d.sys.Learner.Endpoints(d.sys.Wall()) {
-			if (strings.HasPrefix(item.Source, "vpn: ") && learn.VPNServices) ||
-				(strings.HasPrefix(item.Source, "connection: ") && learn.Connections) {
-				found = append(found, item)
-			}
-		}
+	if d.sys.Profiles != nil && d.config.VPNConfigurations {
+		found = append(found, d.sys.Profiles.Endpoints()...)
 	}
 	var unique []Sourced
 	index := map[string]int{}

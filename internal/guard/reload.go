@@ -64,7 +64,7 @@ func (d *Daemon) reloadSettings() {
 		}
 		settings = d.readLastGood()
 	} else {
-		d.settingsError = ""
+		d.settingsError = settings.Note
 	}
 	if d.settings != nil && reflect.DeepEqual(settings, *d.settings) {
 		return

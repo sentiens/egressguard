@@ -82,11 +82,6 @@ func MustEndpoint(text string) Endpoint {
 	return endpoint
 }
 
-func validEndpoint(text string) bool {
-	_, err := ParseEndpoint(text, "endpoint")
-	return err == nil
-}
-
 func family(address netip.Addr) string {
 	if address.Is4() {
 		return "inet"

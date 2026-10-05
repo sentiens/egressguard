@@ -56,7 +56,7 @@ var (
 	}
 	vpnEndpoints = []Endpoint{MustEndpoint("198.51.100.61:51820/udp"), MustEndpoint("198.51.100.164:51820/udp")}
 	baseConfig   = Config{TrustedNetworks: networks, Tunnels: []Tunnel{{Name: "VPN", Endpoints: vpnEndpoints}},
-		Control: "/nonexistent/control.json", Learn: Learn{VPNServices: true, Connections: true, Processes: []string{}}}
+		Control: "/nonexistent/control.json", VPNConfigurations: true}
 
 	home = map[string]Link{
 		"en0": {Router: "192.168.1.1", MAC: homeMAC, Trusted: true, Network: "Home 1", Pin: "address",

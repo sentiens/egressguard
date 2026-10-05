@@ -21,10 +21,10 @@ interface.
    VPN interfaces (utun*, ipsec*) and local ones (lo0, awdl0, bridge*, ...) are untouched.
 ```
 
-- **Any VPN.** WireGuard, IKEv2, OpenVPN or any other client with a tunnel
-  mode: the switch only needs to know where the tunnel's server is. Servers of
-  VPN configurations in macOS are picked up automatically; others can be learned
-  on a trusted network or entered by hand.
+- **Any VPN whose server it knows.** WireGuard, IKEv2, OpenVPN or any other
+  client with a tunnel mode: the switch only needs to know where the tunnel's
+  server is. It takes the server of every VPN configuration in macOS by itself;
+  any other server you add by hand. See *Limits* for VPNs that hide their server.
 - **Trusted networks** are your own routers, identified by router address and
   router MAC (as macOS identifies networks), optionally tied to an interface.
 - **Nothing trusted** is a valid mode: VPN only, even at home.
@@ -103,9 +103,9 @@ The menu bar shield shows the state and offers on and off (15 minutes, 1 hour,
 until turned on). **Settings…** edits:
 
 - trusted networks, with **Trust this network**;
-- the ways out on other networks: servers of VPN configurations in macOS, and
-  servers learned from VPN apps on a trusted network (off by default);
-- your own endpoints (`ip:port`, TCP or UDP);
+- the VPN servers the Mac may reach on other networks: those of the VPN
+  configurations in macOS, listed with their configuration, and your own
+  (`ip:port`, TCP or UDP), marked when a configuration already has them;
 - **No trusted networks: VPN only, even at home**.
 
 The window writes `~/Library/Application Support/EgressGuard/settings.json`; the
@@ -137,8 +137,12 @@ off and on, at home and on a phone hotspot. The full test plan is in
   some Apple processes past pf; `leaktest --safari` checks yours.
 - **Captive portals and LAN services** on untrusted networks are blocked; turn
   the switch off for a portal.
-- **Tunnels with changing server addresses** (provider pools) need learning
-  or manual endpoints.
+- **VPNs that hide their server.** Many VPN apps, commercial ones especially,
+  keep their real server out of the macOS configuration, or pick one from a pool
+  that changes. EgressGuard cannot see those servers: add them by hand, and
+  expect no internet outside trusted networks when the app picks one you have
+  not added. (0.1 and 0.2 could learn servers from a VPN app's connections at
+  home; that only ever knew servers already used there, and 0.3 dropped it.)
 - **Router MACs can be spoofed** by someone on your local network.
 
 ## Uninstall

@@ -23,10 +23,9 @@
 //     bridges are never touched, so any VPN client whose endpoint is known keeps
 //     working on any network, and nothing works when the tunnel is down.
 //
-// Endpoints come from the configuration and are also learned: from the server
-// address of every VPN configuration macOS has (scutil --nc) and, on a trusted
-// network, from the connections a running tunnel provider makes over the
-// uplink. With no trusted networks and no endpoints, nothing passes.
+// Endpoints come from the configuration, the user's settings and the server
+// address of every VPN configuration macOS has (scutil --nc). Nothing else is
+// found by itself. With no trusted networks and no endpoints, nothing passes.
 //
 // pf has no match rules here, so allowed traffic is never passed with a
 // non-quick rule (that would override earlier non-quick blocks). The narrow

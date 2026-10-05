@@ -41,30 +41,25 @@ type Tunnel struct {
 	Endpoints []Endpoint
 }
 
-// Learn says which endpoints the daemon may find by itself.
-type Learn struct {
-	VPNServices bool     // server addresses of the VPN configurations macOS has
-	Connections bool     // connections of running tunnel providers on a trusted network
-	Processes   []string // more provider processes, by name
-}
-
 // Config is the administrator's config.json or, merged with the user's settings
 // (Effective), the policy in force.
 type Config struct {
 	TrustedNetworks []Network
 	Tunnels         []Tunnel
 	Control         string // the user's control file; settings.json sits next to it
-	Learn           Learn
-	VPNOnly         bool
+	// VPNConfigurations: the servers of the VPN configurations macOS has are
+	// endpoints too (learn.vpn_services in config.json).
+	VPNConfigurations bool
+	VPNOnly           bool
 }
 
 // Settings are the user's own settings.json, edited by the menu bar app.
 type Settings struct {
-	TrustedNetworks  []Network
-	Endpoints        []Endpoint
-	LearnVPNServices *bool // nil: the administrator's choice
-	LearnConnections *bool
-	VPNOnly          bool
+	TrustedNetworks   []Network
+	Endpoints         []Endpoint
+	VPNConfigurations *bool // learn_vpn_services; nil: the administrator's choice
+	VPNOnly           bool
+	Note              string // what the file asks for that is no longer done
 }
 
 // DefaultSettings are the settings of a user who has none.
@@ -139,12 +134,11 @@ func parseConfig(value any) (Config, error) {
 		}
 		config.Tunnels = append(config.Tunnels, tunnel)
 	}
-	learn, present := item["learn"]
-	if !present {
-		learn = map[string]any{}
-	}
-	if config.Learn, err = parseLearn(learn); err != nil {
-		return Config{}, err
+	config.VPNConfigurations = true
+	if learn, present := item["learn"]; present {
+		if config.VPNConfigurations, err = parseLearn(learn); err != nil {
+			return Config{}, err
+		}
 	}
 	if config.Control, err = text(item, "control", "config"); err != nil {
 		return Config{}, err
@@ -232,32 +226,17 @@ func parseTunnel(value any, where string) (Tunnel, error) {
 	return tunnel, nil
 }
 
-func parseLearn(value any) (Learn, error) {
-	item, err := object(value, "learn", "vpn_services", "connections", "processes")
+// parseLearn reads the learn object: whether the servers of the VPN
+// configurations macOS has are endpoints.
+func parseLearn(value any) (bool, error) {
+	item, err := object(value, "learn", "vpn_services")
 	if err != nil {
-		return Learn{}, err
+		return false, err
 	}
-	learn := Learn{VPNServices: true, Processes: []string{}}
-	for key, target := range map[string]*bool{"vpn_services": &learn.VPNServices, "connections": &learn.Connections} {
-		if value, present := item[key]; present {
-			if *target, err = boolean(value, "learn."+key); err != nil {
-				return Learn{}, err
-			}
-		}
+	if value, present := item["vpn_services"]; present {
+		return boolean(value, "learn.vpn_services")
 	}
-	processes, ok := optionalList(item, "processes")
-	for _, process := range processes {
-		name, isText := process.(string)
-		if !isText || name == "" || strings.Contains(name, "/") {
-			ok = false
-			break
-		}
-		learn.Processes = append(learn.Processes, name)
-	}
-	if !ok {
-		return Learn{}, configErrorf("learn.processes: a list of process names")
-	}
-	return learn, nil
+	return true, nil
 }
 
 // SettingsPath is where the user's settings live: next to the control file, so the
@@ -309,14 +288,23 @@ func ParseSettings(data []byte) (Settings, error) {
 		}
 		settings.Endpoints = append(settings.Endpoints, endpoint)
 	}
-	for key, target := range map[string]**bool{"learn_vpn_services": &settings.LearnVPNServices,
-		"learn_connections": &settings.LearnConnections} {
-		if value, present := item[key]; present {
-			b, err := boolean(value, "settings."+key)
-			if err != nil {
-				return Settings{}, err
-			}
-			*target = &b
+	if value, present := item["learn_vpn_services"]; present {
+		b, err := boolean(value, "settings.learn_vpn_services")
+		if err != nil {
+			return Settings{}, err
+		}
+		settings.VPNConfigurations = &b
+	}
+	// Learning servers from connections was removed in 0.3.0; files written
+	// before still have the switch, which is accepted and, if on, reported.
+	if value, present := item["learn_connections"]; present {
+		on, err := boolean(value, "settings.learn_connections")
+		if err != nil {
+			return Settings{}, err
+		}
+		if on {
+			settings.Note = "settings: learn_connections is no longer supported and is ignored; " +
+				"add the servers of your VPN in Settings"
 		}
 	}
 	if value, present := item["vpn_only"]; present {
@@ -338,12 +326,8 @@ func Effective(admin Config, settings Settings) Config {
 	if len(settings.Endpoints) > 0 {
 		config.Tunnels = append(config.Tunnels, Tunnel{Name: "own endpoints", Endpoints: settings.Endpoints})
 	}
-	config.Learn.Processes = slices.Clone(admin.Learn.Processes)
-	if settings.LearnVPNServices != nil {
-		config.Learn.VPNServices = *settings.LearnVPNServices
-	}
-	if settings.LearnConnections != nil {
-		config.Learn.Connections = *settings.LearnConnections
+	if settings.VPNConfigurations != nil {
+		config.VPNConfigurations = *settings.VPNConfigurations
 	}
 	config.VPNOnly = settings.VPNOnly
 	return config

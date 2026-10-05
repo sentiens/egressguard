@@ -195,7 +195,6 @@ final class SettingsModel: ObservableObject {
     @Published var networks: [TrustedNetwork] = []
     @Published var endpoints: [String] = []
     @Published var learnVPN = true
-    @Published var learnConnections = false
     @Published var vpnOnly = false
     @Published var status = Status()
     @Published var newName = ""
@@ -224,7 +223,6 @@ final class SettingsModel: ObservableObject {
             networks = try list(json, "trusted_networks").map { TrustedNetwork(json: $0) }
             endpoints = try list(json, "endpoints")
             learnVPN = json["learn_vpn_services"] as? Bool ?? true
-            learnConnections = json["learn_connections"] as? Bool ?? false
             vpnOnly = json["vpn_only"] as? Bool ?? false
         } catch {
             saveError = "\(url.lastPathComponent) cannot be read: \(error.localizedDescription); fix or delete it"
@@ -260,7 +258,6 @@ final class SettingsModel: ObservableObject {
             get: { [weak self] in
                 switch key {
                 case "learn_vpn_services": return self?.learnVPN ?? true
-                case "learn_connections": return self?.learnConnections ?? false
                 default: return self?.vpnOnly ?? false
                 }
             },
@@ -305,8 +302,46 @@ final class SettingsModel: ObservableObject {
         update { $0["endpoints"] = try (list($0, "endpoints") as [String]).filter { $0 != endpoint } }
     }
 
-    var vpnProfileCount: Int { status.endpoints.filter { $0.source.contains("vpn: ") }.count }
-    var learnedCount: Int { status.endpoints.filter { $0.source.contains("connection: ") }.count }
+    /// The servers of the VPN configurations in macOS, as the daemon has them now.
+    var profileServers: [ProfileServer] {
+        var found: [String: ProfileServer] = [:]
+        for (endpoint, source) in status.endpoints {
+            let names = profileNames(source)
+            guard !names.isEmpty else { continue }
+            let (server, proto) = splitEndpoint(endpoint)
+            var entry = found[server] ?? ProfileServer(id: server, protocols: [], profiles: [])
+            entry.protocols = Array(Set(entry.protocols + [proto.uppercased()])).sorted()
+            entry.profiles = Array(Set(entry.profiles + names)).sorted()
+            found[server] = entry
+        }
+        return found.values.sorted { $0.id < $1.id }
+    }
+
+    /// Every server the Mac may reach outside trusted networks, protocols aside.
+    var serverCount: Int { Set(status.endpoints.map { splitEndpoint($0.endpoint).server }).count }
+
+    /// The VPN configurations that already have this endpoint of the user's own.
+    func profilesHaving(_ endpoint: String) -> [String] {
+        status.endpoints.first { $0.endpoint == endpoint }.map { profileNames($0.source) } ?? []
+    }
+}
+
+/// A server of the VPN configurations in macOS: address:port, with its protocols.
+struct ProfileServer: Identifiable {
+    let id: String
+    var protocols: [String]
+    var profiles: [String]
+}
+
+/// The VPN configuration names in a source such as "config: own endpoints, vpn: home-wg".
+func profileNames(_ source: String) -> [String] {
+    source.components(separatedBy: ", ").filter { $0.hasPrefix("vpn: ") }.map { String($0.dropFirst(5)) }
+}
+
+/// "203.0.113.5:443/tcp" as ("203.0.113.5:443", "tcp").
+func splitEndpoint(_ endpoint: String) -> (server: String, proto: String) {
+    guard let slash = endpoint.lastIndex(of: "/") else { return (endpoint, "") }
+    return (String(endpoint[..<slash]), String(endpoint[endpoint.index(after: slash)...]))
 }
 
 struct SettingsView: View {
@@ -343,16 +378,35 @@ struct SettingsView: View {
                     }
                 }
 
-                section("Ways out on other networks",
-                        "Outside trusted networks the Mac may only reach these servers, so a VPN can bring its tunnel up; everything else goes through the tunnel or nowhere.") {
-                    Toggle("VPN configurations in macOS, automatically (servers now: \(model.vpnProfileCount))",
-                           isOn: model.setting("learn_vpn_services"))
-                    Toggle("Learn the servers VPN apps connect to on a trusted network (learned: \(model.learnedCount))",
-                           isOn: model.setting("learn_connections"))
-                    Text("Your own endpoints, always allowed").font(.subheadline)
+                section("VPN servers",
+                        "Outside trusted networks the Mac may reach only these servers, so your VPN can connect; "
+                            + "everything else goes through the VPN or nowhere.") {
+                    Toggle("Take the servers of the VPN configurations in macOS", isOn: model.setting("learn_vpn_services"))
+                    if model.learnVPN {
+                        if model.profileServers.isEmpty {
+                            Text("None found: no VPN configuration in macOS has a server address.")
+                                .font(.caption).foregroundColor(.secondary)
+                        }
+                        ForEach(model.profileServers) { server in
+                            HStack {
+                                Text(server.id).font(.system(.body, design: .monospaced))
+                                Text(server.protocols.joined(separator: ", ")).font(.caption).foregroundColor(.secondary)
+                                Spacer()
+                                Text(server.profiles.joined(separator: ", ")).font(.caption).foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                    Text("Servers you add").font(.subheadline).padding(.top, 6)
                     ForEach(model.endpoints, id: \.self) { endpoint in
                         HStack {
-                            Text(endpoint).font(.system(.body, design: .monospaced))
+                            VStack(alignment: .leading) {
+                                Text(endpoint).font(.system(.body, design: .monospaced))
+                                let profiles = model.profilesHaving(endpoint)
+                                if !profiles.isEmpty {
+                                    Text("Also in \(profiles.joined(separator: ", ")): not needed here while that configuration exists")
+                                        .font(.caption).foregroundColor(.secondary)
+                                }
+                            }
                             Spacer()
                             Button("Remove") { model.removeEndpoint(endpoint) }
                         }
@@ -368,6 +422,10 @@ struct SettingsView: View {
                     if let error = model.inputError {
                         Text(error).font(.caption).foregroundColor(.red)
                     }
+                    Text("Many VPN apps, commercial ones especially, keep their real server out of the macOS "
+                        + "configuration or pick one from a changing pool. Add the servers of such a VPN here: "
+                        + "a server in neither list cannot be reached outside trusted networks.")
+                        .font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
 
                 section("Mode", "") {
@@ -424,7 +482,7 @@ struct SetupView: View {
 
     /// Whether this network will have direct internet once the switch is on.
     var trustedAfter: Bool { model.trustedNow != nil || trustHere == true }
-    var serversKnown: Int { model.vpnProfileCount + model.endpoints.count }
+    var serversKnown: Int { model.serverCount }
     var mustDecide: Bool { model.candidate != nil && trustHere == nil }
     /// Whether turning on now leaves this network without internet.
     var cutsInternet: Bool { !mustDecide && !trustedAfter && model.status.tunnel == nil }

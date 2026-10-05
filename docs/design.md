@@ -11,7 +11,7 @@ user's own files.
 |---|---|---|
 | `egressguard daemon` | `/Library/Application Support/EgressGuard/egressguard` (a copy made by `setup`), log `/Library/Logs/egressguard.log` | root |
 | `config.json` (administrator) | same directory | root-owned, re-read on change |
-| `learned.json`, `status.json`, `pf-tokens`, `settings.last-good.json` | same directory | written by the daemon |
+| `resolved.json`, `status.json`, `pf-tokens`, `settings.last-good.json` | same directory | written by the daemon |
 | `settings.json` (trusted networks, endpoints, switches) | `~/Library/Application Support/EgressGuard/` | the user, through the settings window or `trust-current` |
 | `control.json` (`on`, `off`, `off` until, `lock` until; `off` with `setup_pending` after a first install) | same directory | the user, through the menu or the CLI; `setup` on a first install |
 | `egressguard` CLI | Homebrew `bin` | the user (`setup`, `uninstall`, `leaktest`: sudo) |
@@ -76,16 +76,21 @@ network. Should the daemon not see a MAC it needs, the status says so.
 - **Endpoints.** Where a VPN client may connect from an untrusted network:
   - `ip[:port]/udp|tcp|esp`, IPv4 or IPv6, from the administrator's `tunnels`
     and the user's own endpoints;
-  - the server address of every VPN configuration macOS has (`scutil --nc`).
+  - the server address of every VPN configuration macOS has (`scutil --nc`),
+    unless `learn.vpn_services` (or the user's `learn_vpn_services`) is false.
     WireGuard-like clients are taken as UDP, IKEv2/IPsec as UDP 500/4500 plus
-    ESP. This is a live view: deleting a configuration removes its endpoint;
-  - opt-in: the connections a running tunnel provider (a Network Extension of a
-    connected VPN, or a process named in `learn.processes`) makes over a trusted
-    uplink while the internet route is a tunnel. Connect once at home and the
-    server is learned. It is off by default because a provider also connects to
-    things that are not its tunnel (control servers, DNS bootstrap), and each of
-    those would stay open everywhere. Learned endpoints are kept in
-    `learned.json` and forgotten after 180 days unseen.
+    ESP, others as UDP and TCP. This is a live view, read every minute: deleting
+    a configuration removes its endpoint. A server given by host name is
+    resolved where DNS works (a trusted network or a tunnel), and the last
+    answer is kept in `resolved.json`, so it also works where DNS does not.
+
+  Nothing else is found by itself. A VPN app whose configuration has no real
+  server address (many commercial ones pick a server inside the app, from a
+  pool) needs its servers added by hand. Versions 0.1 and 0.2 could learn them
+  from the app's connections on a trusted network; that knew only servers
+  already used there, needed `ps`, `lsof` and bundle lookups, and is gone. A
+  settings file that still turns it on is accepted, and the status says that
+  the switch is ignored.
 
   Replies from an endpoint are let in only to client ports (1024–65535), so a
   spoofed "VPN server" on a hostile network cannot reach SSH or file sharing.
@@ -180,6 +185,7 @@ anything else. SIGTERM (the uninstaller) stops it from loading any more rules.
 - **iCloud Private Relay** is reportedly mostly disabled while pf rules are loaded.
 - **Router MAC spoofing** by someone on the local network makes their network look
   trusted.
-- **Learned endpoints** are whatever a VPN provider connected to; anything that
-  can add a VPN configuration to macOS (which needs the user's approval) can add
-  an endpoint.
+- **VPN configurations are trusted as endpoints**: anything that can add a VPN
+  configuration to macOS (which needs the user's approval) can add an endpoint.
+- **VPNs that hide their server** cannot connect outside trusted networks until
+  their servers are added by hand.

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.0 (2026-10-05)
+
+- Learning VPN servers from the connections of VPN apps is gone (the
+  `learn_connections` switch, `learn.connections` and `learn.processes`): it
+  knew only servers already used at home, and took `ps`, `lsof` and bundle
+  lookups to do it. VPN servers now come from the VPN configurations in macOS
+  and from the user's own list; the README says plainly which VPNs that leaves
+  out. A settings file that still turns learning on is accepted, and the status
+  says the switch is ignored; an administrator config with the removed keys is
+  refused.
+- The resolved addresses of VPN servers given by host name are kept in
+  `resolved.json` (was `learned.json`, which setup now removes).
+- The settings window lists the servers of the VPN configurations in macOS with
+  their configuration, and marks your own entries that a configuration already
+  has.
+
 ## 0.2.1 (2026-10-05)
 
 - The setup window builds under Homebrew: its state is an `ObservableObject`, not

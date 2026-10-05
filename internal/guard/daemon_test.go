@@ -195,7 +195,7 @@ func TestObservationOvertakenByABreakProvesNothing(t *testing.T) {
 		t.Fatal("open, or reported trusted")
 	}
 	if uplinks, _ := h.daemon.Snapshot(); uplinks["en0"].Trusted {
-		t.Fatal("the learner sees en0 trusted")
+		t.Fatal("the profile scan sees en0 trusted")
 	}
 	if h.daemon.uplinks["en0"].Trusted {
 		t.Fatal("the overtaken observation was kept as trusted")
@@ -242,7 +242,7 @@ func TestLockIgnoresTrust(t *testing.T) {
 		t.Fatal("en0 open or reported trusted during the lock")
 	}
 	if uplinks, _ := h.daemon.Snapshot(); uplinks["en0"].Trusted {
-		t.Fatal("the learner sees en0 trusted during the lock")
+		t.Fatal("the profile scan sees en0 trusted during the lock")
 	}
 	h.clocks.advance(21)
 	h.expect(nil, StateTrusted)
@@ -408,45 +408,44 @@ func TestSilentToolsRevokeTrustAfterAWhile(t *testing.T) {
 	}
 }
 
-type fixedLearner []Sourced
+type fixedProfiles []Sourced
 
-func (f fixedLearner) Endpoints(float64) []Sourced { return f }
+func (f fixedProfiles) Endpoints() []Sourced { return f }
 
-func TestLearnedEndpointsAreRendered(t *testing.T) {
+func TestProfileEndpointsAreRendered(t *testing.T) {
 	h := newHarness(t)
-	learned := fixedLearner{{MustEndpoint("203.0.113.20:443/tcp"), "connection: ExampleVPN"}}
-	h.daemon = h.make(h.config(), func(sys *System) { sys.Learner = learned })
+	profiles := fixedProfiles{{MustEndpoint("203.0.113.20:443/tcp"), "vpn: ExampleVPN"}}
+	h.daemon = h.make(h.config(), func(sys *System) { sys.Profiles = profiles })
 	h.uplinks = cafe
 	h.daemon.Step(nil)
 	if !strings.Contains(h.pf.current, "to 203.0.113.20 port 443") {
 		t.Fatal(h.pf.current)
 	}
-	if !slices.Contains(h.last().Endpoints, EndpointEntry{"203.0.113.20:443/tcp", "connection: ExampleVPN"}) {
+	if !slices.Contains(h.last().Endpoints, EndpointEntry{"203.0.113.20:443/tcp", "vpn: ExampleVPN"}) {
 		t.Fatal(h.last().Endpoints)
 	}
 }
 
 func TestEndpointSourcesMerged(t *testing.T) {
 	h := newHarness(t)
-	learned := fixedLearner{{MustEndpoint("198.51.100.61:51820/udp"), "vpn: home-wg"}}
-	h.daemon = h.make(h.config(), func(sys *System) { sys.Learner = learned })
+	profiles := fixedProfiles{{MustEndpoint("198.51.100.61:51820/udp"), "vpn: home-wg"}}
+	h.daemon = h.make(h.config(), func(sys *System) { sys.Profiles = profiles })
 	h.daemon.Step(nil)
 	if h.last().Endpoints[0] != (EndpointEntry{"198.51.100.61:51820/udp", "config: VPN, vpn: home-wg"}) {
 		t.Fatal(h.last().Endpoints)
 	}
 }
 
-func TestLearningOffDropsLearned(t *testing.T) {
+func TestProfilesOffDropsTheirServers(t *testing.T) {
 	h := newHarness(t)
 	config := h.config()
-	config.Learn = Learn{Processes: []string{}}
-	learned := fixedLearner{{MustEndpoint("45.67.89.20:443/tcp"), "connection: ExampleVPN"}, {MustEndpoint("9.9.9.9:51820/udp"), "vpn: x"}}
-	d := h.make(config, func(sys *System) { sys.Learner = learned })
-	if got := texts(d.endpoints()); slices.Contains(got, "45.67.89.20:443/tcp") || slices.Contains(got, "9.9.9.9:51820/udp") {
+	config.VPNConfigurations = false
+	d := h.make(config, func(sys *System) { sys.Profiles = fixedProfiles{{MustEndpoint("9.9.9.9:51820/udp"), "vpn: x"}} })
+	if got := texts(d.endpoints()); slices.Contains(got, "9.9.9.9:51820/udp") {
 		t.Fatal(got)
 	}
-	d.config.Learn = Learn{VPNServices: true, Connections: true, Processes: []string{}}
-	if got := texts(d.endpoints()); !slices.Contains(got, "45.67.89.20:443/tcp") || !slices.Contains(got, "9.9.9.9:51820/udp") {
+	d.config.VPNConfigurations = true
+	if got := texts(d.endpoints()); !slices.Contains(got, "9.9.9.9:51820/udp") {
 		t.Fatal(got)
 	}
 }

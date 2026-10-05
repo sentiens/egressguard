@@ -20,7 +20,7 @@ settings files), so every rule of the policy is exercised without root:
 | observing uplinks, ARP, pins | `network_test.go` |
 | the pf rules, and `pfctl -n` accepting them | `rules_test.go`, `pf_test.go` |
 | route-monitor messages | `monitor_test.go` |
-| VPN configurations and learning | `learn_test.go` |
+| VPN configurations in macOS | `profiles_test.go` |
 | the decision loop, trust breaks, the self-test | `daemon_test.go`, `urgent_test.go` |
 | dropping pf states on every transition | `revoke_test.go` |
 | sleep, the seal, dark wakes | `power_test.go` |
@@ -60,8 +60,6 @@ then `sudo egressguard uninstall` if needed.
    - VPN off: status `blocked`, no site opens. Run the leak test there too.
    - VPN on: status `tunnel`, sites open.
    - VPN off again: sites stop at once.
-   - With learning on: connect once at home, check `egressguard endpoints` shows
-     `connection: ...`, then repeat on the hotspot.
 5. **Network switch while awake.** Home → hotspot → home. On the hotspot nothing
    goes direct; back home the internet returns within about a second.
 6. **Sleep.**

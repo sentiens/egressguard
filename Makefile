@@ -1,6 +1,6 @@
 # egressguard: build, check and install. The Homebrew formula runs `make install PREFIX=…`.
 PREFIX  ?= /usr/local
-VERSION := 0.2.1
+VERSION := 0.3.0
 GO      ?= go
 SWIFTC  ?= swiftc
 BIN     := build/egressguard

@@ -3,13 +3,10 @@ package guard
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net"
 	"net/netip"
-	"path/filepath"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -133,109 +130,4 @@ func ResolveHost(host string) []string {
 		}
 	}
 	return sortedKeys(unique)
-}
-
-// Connection is one row of `lsof -F pcPnT` with a remote end.
-type Connection struct {
-	PID           int
-	Command       string
-	Proto         string // TCP or UDP
-	Local, Remote string // host:port
-	State         string // TCP state
-}
-
-// LsofConnections parses `lsof -F pcPnT` output.
-func LsofConnections(text string) ([]Connection, error) {
-	var rows []Connection
-	var current Connection
-	var name string
-	flush := func() {
-		if local, remote, found := strings.Cut(name, "->"); found {
-			current.Local, current.Remote = local, remote
-			rows = append(rows, current)
-		}
-		name = ""
-		current = Connection{PID: current.PID, Command: current.Command}
-	}
-	for _, line := range strings.Split(text, "\n") {
-		if line == "" {
-			continue
-		}
-		tag, value := line[0], line[1:]
-		switch tag {
-		case 'p':
-			flush()
-			pid, err := strconv.Atoi(value)
-			if err != nil {
-				return nil, fmt.Errorf("lsof: bad process id %q", value)
-			}
-			current.PID, current.Command = pid, ""
-		case 'f':
-			flush()
-		case 'c':
-			current.Command = value
-		case 'P':
-			current.Proto = value
-		case 'n':
-			name = value
-		case 'T':
-			if state, found := strings.CutPrefix(value, "ST="); found {
-				current.State = state
-			}
-		}
-	}
-	flush()
-	return rows, nil
-}
-
-var (
-	bracketedHostPort = regexp.MustCompile(`^\[([^\]]+)\]:(\d+)$`)
-	plainHostPort     = regexp.MustCompile(`^([^:]+):(\d+)$`)
-)
-
-// SplitHostPort reads "1.2.3.4:5" or "[::1]:5" (a zone is dropped).
-func SplitHostPort(text string) (host string, port int, ok bool) {
-	match := bracketedHostPort.FindStringSubmatch(text)
-	if match == nil {
-		match = plainHostPort.FindStringSubmatch(text)
-	}
-	if match == nil {
-		return "", 0, false
-	}
-	port, err := strconv.Atoi(match[2])
-	host, _, _ = strings.Cut(match[1], "%")
-	return host, port, err == nil
-}
-
-// BundleID is the CFBundleIdentifier of the app extension or system extension a
-// process runs from; "" for a process that runs from neither.
-func BundleID(path string) (string, error) {
-	for _, marker := range []string{".appex/", ".systemextension/"} {
-		if i := strings.Index(path, marker); i >= 0 {
-			info := filepath.Join(path[:i+len(marker)], "Contents", "Info.plist")
-			result := Run([]string{"plutil", "-extract", "CFBundleIdentifier", "raw", "-o", "-", info}, "", 0)
-			if result.Failed() {
-				return "", fmt.Errorf("the bundle ID in %s: %s", info, result.Error())
-			}
-			return strings.TrimSpace(result.Stdout), nil
-		}
-	}
-	return "", nil
-}
-
-// notGlobal are special-purpose ranges (RFC 6890 and the IANA registries), like
-// Python's is_global, multicast included.
-var notGlobal = func() []netip.Prefix {
-	var nets []netip.Prefix
-	for _, text := range []string{"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
-		"172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24", "192.88.99.0/24", "192.168.0.0/16", "198.18.0.0/15",
-		"198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4", "::/128", "::1/128", "::ffff:0:0/96",
-		"64:ff9b:1::/48", "100::/64", "2001::/23", "2001:db8::/32", "2002::/16", "fc00::/7", "fe80::/10", "ff00::/8"} {
-		nets = append(nets, netip.MustParsePrefix(text))
-	}
-	return nets
-}()
-
-func isGlobal(address netip.Addr) bool {
-	return !slices.ContainsFunc(notGlobal, func(net netip.Prefix) bool { return net.Contains(address) })
 }

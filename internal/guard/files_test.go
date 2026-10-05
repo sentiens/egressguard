@@ -79,12 +79,27 @@ func TestVPNOnly(t *testing.T) {
 	h.expect(nil, StateTrusted)
 }
 
-func TestLearningSwitches(t *testing.T) {
+func TestProfilesSwitch(t *testing.T) {
 	h := newHarness(t)
-	h.settings(map[string]any{"learn_vpn_services": false, "learn_connections": true})
+	h.settings(map[string]any{"learn_vpn_services": false})
 	h.daemon.Step(nil)
-	if learn := h.daemon.Config().Learn; !reflect.DeepEqual(learn, Learn{Connections: true, Processes: []string{}}) {
-		t.Fatalf("%+v", learn)
+	if h.daemon.Config().VPNConfigurations || h.hasError("settings") {
+		t.Fatalf("%+v %v", h.daemon.Config(), h.last().Errors)
+	}
+}
+
+func TestRemovedLearningSwitchReported(t *testing.T) {
+	h := newHarness(t)
+	h.settings(map[string]any{"learn_connections": false}) // what the 0.1 and 0.2 menu app wrote
+	h.daemon.Step(nil)
+	if h.hasError("learn_connections") {
+		t.Fatal(h.last().Errors)
+	}
+	h.settings(map[string]any{"learn_connections": true})
+	h.clocks.advance(1)
+	h.daemon.Step(nil)
+	if !h.hasError("learn_connections is no longer supported") {
+		t.Fatal(h.last().Errors)
 	}
 }
 
