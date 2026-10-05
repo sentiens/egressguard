@@ -1,0 +1,7 @@
+{
+  "version": 2,
+  "_about": "Administrator config. Trusted networks and endpoints are normally set in the menu bar app (the user's settings.json next to the control file); entries here apply in addition and cannot be removed there.",
+  "trusted_networks": [],
+  "tunnels": [],
+  "control": "@CONTROL@"
+}

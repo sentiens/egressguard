@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "_about": "Keys starting with _ are ignored. Find a network's router and MAC with: egressguard detect",
+  "trusted_networks": [
+    {"name": "Home", "router": "192.168.1.1", "router_mac": "aa:bb:cc:dd:ee:ff"},
+    {"name": "Office (any router address)", "router_mac": "11:22:33:44:55:66"},
+    {"name": "Office, cable only", "interface": "en5", "router_mac": "11:22:33:44:55:66"}
+  ],
+  "tunnels": [
+    {"name": "WireGuard", "endpoints": ["203.0.113.10:51820/udp", "[2001:db8::10]:51820/udp"]},
+    {"name": "OpenVPN over TCP", "endpoints": ["203.0.113.20:443/tcp"]},
+    {"name": "IKEv2 (built-in macOS VPN)", "endpoints": ["198.51.100.5:500/udp", "198.51.100.5:4500/udp"]}
+  ],
+  "control": "/Users/you/Library/Application Support/EgressGuard/control.json"
+}

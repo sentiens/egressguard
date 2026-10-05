@@ -1,0 +1,22 @@
+name: test
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Install shellcheck
+        run: brew install shellcheck
+      - name: Lint and test (gofmt, go vet, shellcheck, go test -race)
+        run: make test GOTOOLCHAIN=auto
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@latest -checks all ./...
+      - name: Build the binary and the menu bar app
+        run: make GOTOOLCHAIN=auto
+      - name: Stage an install
+        run: make install PREFIX="$RUNNER_TEMP/stage" GOTOOLCHAIN=auto && "$RUNNER_TEMP/stage/bin/egressguard" version
