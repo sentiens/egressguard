@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 0.2.0 (2026-10-05)
 
 - A first install leaves EgressGuard off until the user sets it up: `setup` asks
   in the terminal, and otherwise the menu bar app opens a setup window that asks
