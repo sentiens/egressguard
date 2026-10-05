@@ -67,7 +67,8 @@ func TestMACOnlyAndInterfaceOnly(t *testing.T) {
 
 	config.TrustedNetworks = []Network{{Name: "cable", Interface: "en1", Pin: "none"}}
 	net = newNet()
-	uplinks, _ := Observe(config, false, net.run, false)
+	uplinks, err := Observe(config, false, net.run, false)
+	must(t, err)
 	if !uplinks["en1"].Trusted || uplinks["en0"].Trusted {
 		t.Fatalf("%+v", uplinks)
 	}
@@ -195,8 +196,15 @@ func TestRouterSignatures(t *testing.T) {
 		return done("<dictionary> {\n  InterfaceName : utun4\n}\n", 0)
 	}
 	want := map[string]RouterSignature{"en0": {Router: "192.168.1.1", MAC: homeMAC}}
-	if got := RouterSignatures(run); !reflect.DeepEqual(got, want) {
-		t.Fatal(got)
+	if got, err := RouterSignatures(run); err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatal(got, err)
+	}
+}
+
+func TestRouterSignaturesUnanswered(t *testing.T) {
+	run := func(args []string, input string, timeout time.Duration) Result { return done("", 1) }
+	if got, err := RouterSignatures(run); err == nil || got != nil {
+		t.Fatal(got, err)
 	}
 }
 

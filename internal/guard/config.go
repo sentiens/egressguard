@@ -146,7 +146,9 @@ func parseConfig(value any) (Config, error) {
 	if config.Learn, err = parseLearn(learn); err != nil {
 		return Config{}, err
 	}
-	config.Control, _ = item["control"].(string)
+	if config.Control, err = text(item, "control", "config"); err != nil {
+		return Config{}, err
+	}
 	if !filepath.IsAbs(config.Control) {
 		return Config{}, configErrorf("config: control must be an absolute path")
 	}
@@ -158,19 +160,27 @@ func parseNetwork(value any, where string) (Network, error) {
 	if err != nil {
 		return Network{}, err
 	}
-	name, _ := item["name"].(string)
+	name, err := text(item, "name", where)
+	if err != nil {
+		return Network{}, err
+	}
 	if strings.TrimSpace(name) == "" {
 		return Network{}, configErrorf("%s: needs a name", where)
 	}
 	network := Network{Name: strings.TrimSpace(name), Pin: "address"}
-	if pin, present := item["pin"]; present {
-		network.Pin, _ = pin.(string)
+	if _, present := item["pin"]; present {
+		if network.Pin, err = text(item, "pin", where); err != nil {
+			return Network{}, err
+		}
 		if network.Pin != "address" && network.Pin != "subnet" && network.Pin != "none" {
 			return Network{}, configErrorf("%s: pin is address, subnet or none", where)
 		}
 	}
-	if value, present := item["interface"]; present {
-		name, _ := value.(string)
+	if _, present := item["interface"]; present {
+		name, err := text(item, "interface", where)
+		if err != nil {
+			return Network{}, err
+		}
 		if !uplinkPattern.MatchString(name) || IsInternal(name) {
 			return Network{}, configErrorf("%s: interface must be an uplink name such as en0", where)
 		}
@@ -200,7 +210,10 @@ func parseTunnel(value any, where string) (Tunnel, error) {
 	if err != nil {
 		return Tunnel{}, err
 	}
-	name, _ := item["name"].(string)
+	name, err := text(item, "name", where)
+	if err != nil {
+		return Tunnel{}, err
+	}
 	if strings.TrimSpace(name) == "" {
 		return Tunnel{}, configErrorf("%s: needs a name", where)
 	}
@@ -383,6 +396,19 @@ func optionalList(item map[string]any, key string) ([]any, bool) {
 	}
 	items, ok := value.([]any)
 	return items, ok
+}
+
+// text is item[key] if it is a string, "" if it is absent, and an error otherwise.
+func text(item map[string]any, key, where string) (string, error) {
+	value, present := item[key]
+	if !present {
+		return "", nil
+	}
+	s, ok := value.(string)
+	if !ok {
+		return "", configErrorf("%s: %s must be a string", where, key)
+	}
+	return s, nil
 }
 
 func boolean(value any, where string) (bool, error) {

@@ -93,7 +93,9 @@ func block(kind uint32, body []byte) []byte {
 func le(values ...any) []byte {
 	var b bytes.Buffer
 	for _, v := range values {
-		binary.Write(&b, binary.LittleEndian, v)
+		if err := binary.Write(&b, binary.LittleEndian, v); err != nil {
+			panic(err) // a fixture with a value of no fixed size
+		}
 	}
 	return b.Bytes()
 }
@@ -161,6 +163,10 @@ func TestVerdicts(t *testing.T) {
 	if v := Verdict(ula, endpoints, nil); v != "local" {
 		t.Errorf("ula: %s", v)
 	}
+	broadcast := ParseFrame(ethernet(myMAC, ipv4Packet("203.0.113.7", "255.255.255.255", 17, ports(5000, 9, 4)), 0x0800))
+	if v := Verdict(broadcast, endpoints, nil); v != "local" {
+		t.Errorf("broadcast: %s", v)
+	}
 }
 
 func TestCutShortCaptures(t *testing.T) {
@@ -175,7 +181,7 @@ func TestCutShortCaptures(t *testing.T) {
 
 func TestParseFrame(t *testing.T) {
 	p := ParseFrame(frames[7])
-	if p.Family != "inet6" || p.Proto != 6 || p.Dst != "2606:4700::1111" || !p.HasPorts || p.Dport != 443 {
+	if p.Family != "inet6" || p.Proto != 6 || p.Dst.String() != "2606:4700::1111" || !p.HasPorts || p.Dport != 443 {
 		t.Errorf("got %+v", p)
 	}
 	if ParseFrame([]byte("short")) != nil {
@@ -214,9 +220,16 @@ func TestTruncatedInputDoesNotPanic(t *testing.T) {
 		for j := range garbage {
 			garbage[j] = byte(n*131 + j*j*7)
 		}
-		Frames(garbage)
-		Frames(append([]byte{0x0a, 0x0d, 0x0d, 0x0a}, garbage...))
-		Frames(append([]byte{0xd4, 0xc3, 0xb2, 0xa1}, garbage...))
+		for _, data := range [][]byte{garbage, append([]byte{0x0a, 0x0d, 0x0d, 0x0a}, garbage...),
+			append([]byte{0xd4, 0xc3, 0xb2, 0xa1}, garbage...)} {
+			// Garbage must not panic, and what it yields must lie within it.
+			frames, err := Frames(data)
+			for _, frame := range frames {
+				if err == nil && len(frame.Data) > len(data) {
+					t.Fatalf("a frame of %d bytes from %d bytes", len(frame.Data), len(data))
+				}
+			}
+		}
 	}
 }
 
@@ -307,7 +320,9 @@ func TestPcapngBigEndianSection(t *testing.T) {
 	be := func(values ...any) []byte {
 		var b bytes.Buffer
 		for _, v := range values {
-			binary.Write(&b, binary.BigEndian, v)
+			if err := binary.Write(&b, binary.BigEndian, v); err != nil {
+				panic(err) // a fixture with a value of no fixed size
+			}
 		}
 		return b.Bytes()
 	}
@@ -331,7 +346,7 @@ func TestVLANTaggedFrame(t *testing.T) {
 	tagged := append(append([]byte(nil), inner[:12]...), 0x88, 0xa8, 0, 10, 0x81, 0x00, 0, 20, 0x08, 0x00)
 	tagged = append(tagged, inner[14:]...)
 	p := ParseFrame(tagged)
-	if p == nil || p.Family != "inet" || p.Dst != "1.1.1.1" || p.Dport != 53 || p.SrcMAC != myMAC {
+	if p == nil || p.Family != "inet" || p.Dst.String() != "1.1.1.1" || p.Dport != 53 || p.SrcMAC != myMAC {
 		t.Errorf("got %+v", p)
 	}
 }

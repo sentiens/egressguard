@@ -3,6 +3,7 @@ package guard
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"path/filepath"
@@ -144,7 +145,7 @@ type Connection struct {
 }
 
 // LsofConnections parses `lsof -F pcPnT` output.
-func LsofConnections(text string) []Connection {
+func LsofConnections(text string) ([]Connection, error) {
 	var rows []Connection
 	var current Connection
 	var name string
@@ -164,8 +165,11 @@ func LsofConnections(text string) []Connection {
 		switch tag {
 		case 'p':
 			flush()
-			current.PID, _ = strconv.Atoi(value)
-			current.Command = ""
+			pid, err := strconv.Atoi(value)
+			if err != nil {
+				return nil, fmt.Errorf("lsof: bad process id %q", value)
+			}
+			current.PID, current.Command = pid, ""
 		case 'f':
 			flush()
 		case 'c':
@@ -181,7 +185,7 @@ func LsofConnections(text string) []Connection {
 		}
 	}
 	flush()
-	return rows
+	return rows, nil
 }
 
 var (
@@ -204,19 +208,19 @@ func SplitHostPort(text string) (host string, port int, ok bool) {
 }
 
 // BundleID is the CFBundleIdentifier of the app extension or system extension a
-// process runs from, or "".
-func BundleID(path string) string {
+// process runs from; "" for a process that runs from neither.
+func BundleID(path string) (string, error) {
 	for _, marker := range []string{".appex/", ".systemextension/"} {
 		if i := strings.Index(path, marker); i >= 0 {
 			info := filepath.Join(path[:i+len(marker)], "Contents", "Info.plist")
 			result := Run([]string{"plutil", "-extract", "CFBundleIdentifier", "raw", "-o", "-", info}, "", 0)
 			if result.Failed() {
-				return ""
+				return "", fmt.Errorf("the bundle ID in %s: %s", info, result.Error())
 			}
-			return strings.TrimSpace(result.Stdout)
+			return strings.TrimSpace(result.Stdout), nil
 		}
 	}
-	return ""
+	return "", nil
 }
 
 // notGlobal are special-purpose ranges (RFC 6890 and the IANA registries), like

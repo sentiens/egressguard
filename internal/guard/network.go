@@ -100,13 +100,16 @@ func Interfaces(text string) map[string]*Interface {
 			current.V4 = append(current.V4, fmt.Sprintf("%s/%d", words[1], bits))
 		case "inet6":
 			address, err := netip.ParseAddr(strings.SplitN(words[1], "%", 2)[0])
+			if err != nil || !address.Is6() || address.Is4In6() {
+				continue
+			}
 			bits := 128
-			if length, ok := option(words, "prefixlen"); ok && isDigits(length) {
-				bits, _ = strconv.Atoi(length)
+			if length, ok := option(words, "prefixlen"); ok {
+				if bits, err = strconv.Atoi(length); err != nil || bits < 0 || bits > 128 {
+					continue // not an address ifconfig would print: skip it rather than guess
+				}
 			}
-			if err == nil && address.Is6() && !address.Is4In6() && bits <= 128 {
-				current.V6 = append(current.V6, netip.PrefixFrom(address, bits).String())
-			}
+			current.V6 = append(current.V6, netip.PrefixFrom(address, bits).String())
 		}
 	}
 	return found
@@ -268,7 +271,11 @@ func probe(config Config, name string, addresses *Interface, bridge string, refr
 		}
 		for attempt := range 4 {
 			if attempt > 0 { // nothing cached: a ping makes the router answer ARP
-				run([]string{"ping", "-c", "1", "-t", "1", "-b", name, link.Router}, "", 3*time.Second)
+				// The ping itself may well go unanswered; only a ping that cannot run is a failure.
+				ping := run([]string{"ping", "-c", "1", "-t", "1", "-b", name, link.Router}, "", 3*time.Second)
+				if ping.Err != nil {
+					return Link{}, &Unanswered{Command: "ping " + link.Router, Err: ping.Err}
+				}
 			}
 			mac, err := ARP(link.Router, name, run)
 			if err != nil {
@@ -332,20 +339,29 @@ type TunnelState struct {
 
 var routeInterface = regexp.MustCompile(`interface: (\S+)`)
 
-// TunnelStatus is the tunnel the internet route goes through now, or nil.
-func TunnelStatus(run Runner) *TunnelState {
-	match := routeInterface.FindStringSubmatch(run([]string{"route", "-n", "get", "1.1.1.1"}, "", 0).Stdout)
+// TunnelStatus is the tunnel the internet route goes through now, or nil. No route
+// at all (offline) is no tunnel. If the connected VPN services cannot be listed,
+// the tunnel comes without their names, with the error.
+func TunnelStatus(run Runner) (*TunnelState, error) {
+	route, err := answer(run, "route", "-n", "get", "1.1.1.1")
+	if err != nil {
+		return nil, err
+	}
+	match := routeInterface.FindStringSubmatch(route.Stdout)
 	if match == nil || !IsInternal(match[1]) || strings.HasPrefix(match[1], "lo") {
-		return nil
+		return nil, nil
 	}
 	tunnel := &TunnelState{Interface: match[1], Services: []string{}}
-	services, _ := VPNServices(run) // the names are only for display
+	services, err := VPNServices(run)
+	if err != nil {
+		return tunnel, fmt.Errorf("the VPN services of %s: %w", tunnel.Interface, err)
+	}
 	for _, service := range services {
 		if service.Connected {
 			tunnel.Services = append(tunnel.Services, service.Name)
 		}
 	}
-	return tunnel
+	return tunnel, nil
 }
 
 var (
@@ -359,17 +375,30 @@ var (
 // line tools that are not Apple's unless they may use the local network; configd
 // still knows the router. Only for proposing a network to trust: the daemon checks
 // the MAC itself.
-func RouterSignatures(run Runner) map[string]RouterSignature {
+func RouterSignatures(run Runner) (map[string]RouterSignature, error) {
+	scutil := func(command string) (string, error) {
+		result := run([]string{"scutil"}, command+"\n", 0)
+		if result.Failed() {
+			return "", &Unanswered{Command: "scutil " + command, Err: errors.New(result.Error())}
+		}
+		return result.Stdout, nil
+	}
+	list, err := scutil("list State:/Network/Service/[^/]+/IPv4")
+	if err != nil {
+		return nil, err
+	}
 	found := map[string]RouterSignature{}
-	list := run([]string{"scutil"}, "list State:/Network/Service/[^/]+/IPv4\n", 0).Stdout
 	for _, key := range serviceKey.FindAllStringSubmatch(list, -1) {
-		out := run([]string{"scutil"}, "show "+key[1]+"\n", 0).Stdout
+		out, err := scutil("show " + key[1])
+		if err != nil {
+			return nil, err
+		}
 		name, signature := interfaceName.FindStringSubmatch(out), signatureLine.FindStringSubmatch(out)
 		if name != nil && signature != nil && IPv4(signature[1]) != "" {
 			found[name[1]] = RouterSignature{Router: IPv4(signature[1]), MAC: NormalizeMAC(signature[2])}
 		}
 	}
-	return found
+	return found, nil
 }
 
 // RouterSignature is a network as configd recorded it.
@@ -386,10 +415,11 @@ var trailingNumber = regexp.MustCompile(`^(\D+)(\d+)$`)
 
 func splitNumber(name string) (string, int) {
 	if match := trailingNumber.FindStringSubmatch(name); match != nil {
-		number, _ := strconv.Atoi(match[2])
-		return match[1], number
+		if number, err := strconv.Atoi(match[2]); err == nil {
+			return match[1], number
+		}
 	}
-	return name, -1
+	return name, -1 // no number, or too long for one: ordered by name alone
 }
 
 func sortedKeys[V any](set map[string]V) []string {

@@ -27,7 +27,7 @@ const probeTimeout = 3 * time.Second
 // leakTest captures every packet leaving the uplinks while no network is trusted,
 // makes requests, and fails on any packet that got past the rules: on a closed
 // uplink pf drops everything else before the capture sees it.
-func (a *app) leakTest(args []string) error {
+func (a *app) leakTest(args []string) (err error) {
 	seconds, safari, err := parseLeakArgs(args)
 	if err != nil {
 		return err
@@ -56,7 +56,7 @@ func (a *app) leakTest(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer captures.kill() // never leave a capture running, whatever happened
+	defer func() { err = errors.Join(err, captures.kill()) }() // never leave a capture running
 	time.Sleep(1500 * time.Millisecond)
 	if err := captures.running(); err != nil {
 		return err
@@ -85,13 +85,20 @@ func (a *app) leakTest(args []string) error {
 			return fmt.Errorf("inconclusive: %s: %w", name, err)
 		}
 	}
-	report, err := judge(data, uplinks, from, to, leakEndpoints(before), routersOf(before))
+	endpoints, err := leakEndpoints(before)
 	if err != nil {
 		return fmt.Errorf("inconclusive: %w", err)
 	}
-	after := a.waitFor(10*time.Second, func(s *statusFile) bool { return s.Mode != guard.ModeLock })
+	report, err := judge(data, uplinks, from, to, endpoints, routersOf(before))
+	if err != nil {
+		return fmt.Errorf("inconclusive: %w", err)
+	}
 	a.printReport(report, to.Sub(from))
-	a.printf("after the test: %s\n", describe(after))
+	if after, err := a.waitFor(10*time.Second, func(s *statusFile) bool { return s.Mode != guard.ModeLock }); err != nil {
+		a.printf("after the test: the daemon did not leave the self-test: %v\n", err)
+	} else {
+		a.printf("after the test: %s\n", describe(after))
+	}
 	a.printf("the capture is kept in %s\n", work)
 	if !report.clean() {
 		return exitStatus(1)
@@ -120,11 +127,12 @@ func probeBudget(uplinks int) time.Duration {
 }
 
 // probe waits for the lock, makes requests for the given seconds, and checks the
-// lock held to the end. It returns the window to judge.
+// lock held to the end. It returns the window to judge. The requests are meant to
+// fail; one that could not even be made leaves the test inconclusive.
 func (a *app) probe(seconds int, safari bool, uplinks map[string]string) (from, to time.Time, err error) {
-	locked := a.waitFor(10*time.Second, func(s *statusFile) bool { return s.Mode == guard.ModeLock })
-	if locked == nil {
-		return from, to, errors.New("the daemon did not enter the self-test")
+	locked, err := a.waitFor(10*time.Second, func(s *statusFile) bool { return s.Mode == guard.ModeLock })
+	if err != nil {
+		return from, to, fmt.Errorf("the daemon did not enter the self-test: %w", err)
 	}
 	if !locked.Enforced {
 		return from, to, errors.New("the rules are not in force: " + strings.Join(locked.Errors, "; "))
@@ -132,19 +140,30 @@ func (a *app) probe(seconds int, safari bool, uplinks map[string]string) (from, 
 	time.Sleep(time.Second)
 	watch := a.watchLock()
 	from = time.Now()
+	var problems []error
 	if uid := os.Getenv("SUDO_UID"); safari && uid != "" {
-		exec.Command("/bin/launchctl", "asuser", uid, "/usr/bin/sudo", "-u", "#"+uid, "/usr/bin/open", "-g", "-a",
-			"Safari", "https://example.com/?egressguard-leaktest").Run()
+		// Safari opening the page is the probe; it either opens or the probe did not run.
+		if err := exec.Command("/bin/launchctl", "asuser", uid, "/usr/bin/sudo", "-u", "#"+uid, "/usr/bin/open", "-g",
+			"-a", "Safari", "https://example.com/?egressguard-leaktest").Run(); err != nil {
+			problems = append(problems, fmt.Errorf("the Safari probe did not open: %w", err))
+		}
 	}
-	for _, name := range sortedKeys(uplinks) {
-		reachable(name, leakTargets, probeTimeout)
+	for _, name := range append(sortedKeys(uplinks), "") { // each uplink, then the default route
+		if _, err := reachable(name, leakTargets, probeTimeout); err != nil {
+			problems = append(problems, err)
+		}
 	}
-	reachable("", leakTargets, probeTimeout)
-	exec.Command("/sbin/ping", "-c", "2", "-t", "3", "8.8.8.8").Run()
-	exec.Command("/usr/bin/dig", "+time=2", "+tries=1", "@1.1.1.1", "example.com").Run()
+	for _, cmd := range []*exec.Cmd{
+		exec.Command("/sbin/ping", "-c", "2", "-t", "3", "8.8.8.8"),
+		exec.Command("/usr/bin/dig", "+time=2", "+tries=1", "@1.1.1.1", "example.com"),
+	} {
+		if _, err := attempt(cmd); err != nil {
+			problems = append(problems, err)
+		}
+	}
 	time.Sleep(time.Until(from.Add(time.Duration(seconds) * time.Second)))
 	to = time.Now()
-	return from, to, watch()
+	return from, to, errors.Join(append(problems, watch())...)
 }
 
 // watchLock checks the status every half second until the returned function is
@@ -154,9 +173,11 @@ func (a *app) watchLock() (stop func() error) {
 	go func() {
 		var problem error
 		for {
-			switch status := a.readStatus(); {
+			switch status, err := a.readStatus(); {
 			case problem != nil:
-			case status == nil || status.Mode != guard.ModeLock || status.Age > 15*time.Second:
+			case err != nil:
+				problem = fmt.Errorf("the status could not be read during the test: %w", err)
+			case status.Mode != guard.ModeLock || status.Age > 15*time.Second:
 				problem = errors.New("the self-test ended before the capture window did")
 			case !status.Enforced:
 				problem = errors.New("the rules were not in force during the test")
@@ -183,7 +204,14 @@ func captureUplinks() (map[string]string, error) {
 	}
 	uplinks := map[string]string{}
 	for name, iface := range guard.Interfaces(result.Stdout) {
-		if !guard.IsInternal(name) && iface.MAC != "" && (len(iface.V4) > 0 || hasGlobalV6(iface.V6)) {
+		if guard.IsInternal(name) || iface.MAC == "" {
+			continue
+		}
+		global, err := hasGlobalV6(iface.V6)
+		if err != nil {
+			return nil, fmt.Errorf("ifconfig %s: %w", name, err)
+		}
+		if len(iface.V4) > 0 || global {
 			uplinks[name] = iface.MAC
 		}
 	}
@@ -193,11 +221,17 @@ func captureUplinks() (map[string]string, error) {
 	return uplinks, nil
 }
 
-func hasGlobalV6(prefixes []string) bool {
-	return slices.ContainsFunc(prefixes, func(text string) bool {
+func hasGlobalV6(prefixes []string) (bool, error) {
+	for _, text := range prefixes {
 		prefix, err := netip.ParsePrefix(text)
-		return err == nil && !prefix.Addr().IsLinkLocalUnicast()
-	})
+		if err != nil {
+			return false, err
+		}
+		if !prefix.Addr().IsLinkLocalUnicast() {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // --- captures --------------------------------------------------------------------------
@@ -224,8 +258,7 @@ func startCaptures(dir string, uplinks map[string]string, command func(iface, fi
 		file := filepath.Join(dir, name+".pcap")
 		c := &capture{cmd: command(name, file), file: file, exited: make(chan struct{})}
 		if err := c.cmd.Start(); err != nil {
-			started.kill()
-			return nil, fmt.Errorf("capture on %s: %w", name, err)
+			return nil, errors.Join(fmt.Errorf("capture on %s: %w", name, err), started.kill())
 		}
 		go func() {
 			c.err = c.cmd.Wait()
@@ -254,11 +287,13 @@ func (c captures) stop(timeout time.Duration) error {
 	if err := c.running(); err != nil {
 		return err
 	}
-	for _, capture := range c {
-		capture.cmd.Process.Signal(syscall.SIGINT)
+	var problems []error
+	for _, name := range sortedKeys(c) {
+		if err := c[name].cmd.Process.Signal(syscall.SIGINT); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			problems = append(problems, fmt.Errorf("the capture on %s was not stopped: %w", name, err))
+		}
 	}
 	deadline := time.After(timeout)
-	var problems []error
 	for _, name := range sortedKeys(c) {
 		capture := c[name]
 		select {
@@ -267,23 +302,29 @@ func (c captures) stop(timeout time.Duration) error {
 				problems = append(problems, fmt.Errorf("the capture on %s failed: %w", name, capture.err))
 			}
 		case <-deadline:
-			c.kill()
-			return fmt.Errorf("the captures did not finish within %s", timeout)
+			return errors.Join(fmt.Errorf("the captures did not finish within %s", timeout), c.kill())
 		}
 	}
 	return errors.Join(problems...)
 }
 
 // kill ends every capture still running, and waits for it.
-func (c captures) kill() {
-	for _, capture := range c {
+func (c captures) kill() error {
+	var problems []error
+	for _, name := range sortedKeys(c) {
+		capture := c[name]
 		select {
 		case <-capture.exited:
+			continue
 		default:
-			capture.cmd.Process.Kill()
-			<-capture.exited
 		}
+		if err := capture.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			problems = append(problems, fmt.Errorf("the capture on %s could not be killed: %w", name, err))
+			continue // it cannot be waited for
+		}
+		<-capture.exited
 	}
+	return errors.Join(problems...)
 }
 
 // --- judging -----------------------------------------------------------------------------
@@ -325,7 +366,7 @@ func judge(data map[string][]byte, macs map[string]string, from, to time.Time, e
 				if packet.HasPorts {
 					port = packet.Dport
 				}
-				report.leaks[leakKey{verdict, name, packet.Family, leak.ProtoName(packet.Proto), packet.Dst, port}]++
+				report.leaks[leakKey{verdict, name, packet.Family, leak.ProtoName(packet.Proto), packet.Dst.String(), port}]++
 			}
 		}
 	}
@@ -364,14 +405,16 @@ func (a *app) printReport(report leakReport, window time.Duration) {
 }
 
 // leakEndpoints are the endpoints in force, as the leak verdict wants them.
-func leakEndpoints(status *statusFile) []leak.Endpoint {
+func leakEndpoints(status *statusFile) ([]leak.Endpoint, error) {
 	var endpoints []leak.Endpoint
 	for _, item := range status.Endpoints {
-		if e, err := guard.ParseEndpoint(item.Endpoint, "endpoint"); err == nil {
-			endpoints = append(endpoints, leak.Endpoint{Address: e.Address, Family: e.Family, Proto: e.Proto, Port: e.Port})
+		e, err := guard.ParseEndpoint(item.Endpoint, "the daemon's endpoint")
+		if err != nil {
+			return nil, err
 		}
+		endpoints = append(endpoints, leak.Endpoint{Address: e.Address, Family: e.Family, Proto: e.Proto, Port: e.Port})
 	}
-	return endpoints
+	return endpoints, nil
 }
 
 func routersOf(status *statusFile) map[string]bool {

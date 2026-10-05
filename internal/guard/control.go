@@ -44,7 +44,10 @@ func ReadControl(path string, now float64) Control {
 	if err != nil {
 		return Control{Mode: ModeOn, Note: "control file unreadable, treated as on"}
 	}
-	mode, _ := value["mode"].(string)
+	mode, isText := value["mode"].(string)
+	if !isText {
+		return Control{Mode: ModeOn, Note: "control file has no mode, treated as on"}
+	}
 	var until *int64
 	if raw, present := value["until"]; present && raw != nil {
 		number, isNumber := raw.(json.Number)

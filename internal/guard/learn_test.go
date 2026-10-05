@@ -2,12 +2,13 @@ package guard
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/netip"
-	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -102,7 +103,7 @@ func TestLsofParse(t *testing.T) {
 		{2002, "PacketTunnel", "UDP", "192.168.1.108:61000", "198.51.100.61:51820", ""},
 		{2002, "PacketTunnel", "TCP", "192.168.1.108:50000", "203.0.113.20:443", "ESTABLISHED"},
 	}
-	if got := LsofConnections(text); !reflect.DeepEqual(got, want) {
+	if got, err := LsofConnections(text); err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("%+v", got)
 	}
 }
@@ -130,9 +131,9 @@ func newLearning(t *testing.T) *learning {
 	return &learning{t: t, dir: t.TempDir(), now: 2_000_000_000, show: ncShow()}
 }
 
-func (l *learning) learner(extra func([]string) Result, bundle func(string) string) *Learner {
+func (l *learning) learner(extra func([]string) Result, bundle func(string) (string, error)) *Learner {
 	if bundle == nil {
-		bundle = func(string) string { return "" }
+		bundle = func(string) (string, error) { return "", nil }
 	}
 	return NewLearner(filepath.Join(l.dir, "learned.json"), scutilRunner(l.t, l.show, extra),
 		func(string) []string { return []string{"198.51.100.7"} }, bundle)
@@ -158,11 +159,11 @@ func sources(items []Sourced) map[string]string {
 func TestServicesAreALiveView(t *testing.T) {
 	l := newLearning(t)
 	learner := l.learner(nil, nil)
-	learner.ScanServices(false)
+	must(t, learner.ScanServices(false))
 	if got := texts(learner.Endpoints(l.now)); !reflect.DeepEqual(got, []string{"198.51.100.185:51820/udp", "198.51.100.61:51820/udp"}) {
 		t.Fatal(got)
 	}
-	learner.ScanServices(true)
+	must(t, learner.ScanServices(true))
 	found := sources(learner.Endpoints(l.now))
 	if found["198.51.100.7/esp"] != "vpn: Office" || found["198.51.100.61:51820/udp"] != "vpn: home-wg" {
 		t.Fatal(found)
@@ -172,13 +173,13 @@ func TestServicesAreALiveView(t *testing.T) {
 	if len(again.Endpoints(l.now)) != 0 {
 		t.Fatal("configurations remembered")
 	}
-	again.ScanServices(false)
+	must(t, again.ScanServices(false))
 	if !slices.Contains(texts(again.Endpoints(l.now)), "198.51.100.7/esp") {
 		t.Fatal("the resolved address is forgotten")
 	}
 	// A deleted configuration takes its endpoint with it.
 	l.show["F866AE22-4EC1-4524-8769-86A290A0C582"] = vpnServer{"Deleted Mesh", ""}
-	again.ScanServices(false)
+	must(t, again.ScanServices(false))
 	if slices.Contains(texts(again.Endpoints(l.now)), "198.51.100.185:51820/udp") {
 		t.Fatal("a deleted configuration is still allowed")
 	}
@@ -187,7 +188,7 @@ func TestServicesAreALiveView(t *testing.T) {
 func TestScanFailureKeepsTheServices(t *testing.T) {
 	l := newLearning(t)
 	learner := l.learner(nil, nil)
-	learner.ScanServices(false)
+	must(t, learner.ScanServices(false))
 	learner.run = func([]string, string, time.Duration) Result { return Result{Code: -1, Err: errTimeout} }
 	if err := learner.ScanServices(false); err == nil {
 		t.Fatal("no error")
@@ -206,9 +207,8 @@ func TestForgottenWhenUnseen(t *testing.T) {
 		t.Fatal("an old endpoint is kept")
 	}
 	learner.Remember([]string{"203.0.113.6:1194/udp"}, "test", l.now)
-	data, _ := os.ReadFile(filepath.Join(l.dir, "learned.json"))
 	var saved struct{ Endpoints map[string]any }
-	json.Unmarshal(data, &saved)
+	must(t, json.Unmarshal([]byte(readFile(t, filepath.Join(l.dir, "learned.json"))), &saved))
 	if _, kept := saved.Endpoints["203.0.113.5:1194/udp"]; kept {
 		t.Fatal("an old endpoint is saved")
 	}
@@ -216,8 +216,8 @@ func TestForgottenWhenUnseen(t *testing.T) {
 
 func TestLearnedGarbageIgnored(t *testing.T) {
 	l := newLearning(t)
-	os.WriteFile(filepath.Join(l.dir, "learned.json"),
-		[]byte(`{"endpoints": {"nonsense": {}, "1.2.3.4:5/udp": {"last": 2000000000}}}`), 0o644)
+	writeFile(t, filepath.Join(l.dir, "learned.json"),
+		`{"endpoints": {"nonsense": {}, "1.2.3.4:5/udp": {"last": 2000000000}}}`)
 	learner := l.learner(nil, nil)
 	if keys := sortedKeys(learner.entries); !reflect.DeepEqual(keys, []string{"1.2.3.4:5/udp"}) {
 		t.Fatal(keys)
@@ -253,7 +253,7 @@ func TestConnectionsOfRunningProviders(t *testing.T) {
 		"/Applications/Other.app/Contents/PlugIns/Share.appex/Contents/MacOS/Share":                    "com.other.share",
 		"/System/Library/X.appex/Contents/MacOS/X":                                                     "com.example.vpn.tunnel",
 	}
-	learner := l.learner(l.connections, func(path string) string { return bundles[path] })
+	learner := l.learner(l.connections, func(path string) (string, error) { return bundles[path], nil })
 	tunnel := &TunnelState{Interface: "utun5", Services: []string{"ExampleVPN"}}
 	if err := learner.ScanConnections(home, tunnel, []string{"openvpn"}, l.now); err != nil {
 		t.Fatal(err)
@@ -270,10 +270,54 @@ func TestConnectionsOfRunningProviders(t *testing.T) {
 
 func TestNoLearningWithoutTunnelOrTrust(t *testing.T) {
 	l := newLearning(t)
-	learner := l.learner(l.connections, func(string) string { return "com.example.vpn.tunnel" })
-	learner.ScanConnections(home, nil, nil, l.now)
-	learner.ScanConnections(cafe, &TunnelState{Interface: "utun5", Services: []string{}}, nil, l.now)
+	learner := l.learner(l.connections, func(string) (string, error) { return "com.example.vpn.tunnel", nil })
+	for _, scan := range []struct {
+		uplinks map[string]Link
+		tunnel  *TunnelState
+	}{{home, nil}, {cafe, &TunnelState{Interface: "utun5", Services: []string{}}}} {
+		if err := learner.ScanConnections(scan.uplinks, scan.tunnel, nil, l.now); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if len(learner.Endpoints(l.now)) != 0 {
 		t.Fatal("learned")
+	}
+}
+
+func TestUnreadableBundleReportedTheRestLearned(t *testing.T) {
+	l := newLearning(t)
+	learner := l.learner(l.connections, func(path string) (string, error) {
+		if strings.Contains(path, "Share.appex") {
+			return "", errors.New("plutil: no answer")
+		}
+		return "com.example.vpn.tunnel", nil
+	})
+	tunnel := &TunnelState{Interface: "utun5", Services: []string{"ExampleVPN"}}
+	err := learner.ScanConnections(home, tunnel, nil, l.now)
+	if err == nil || !strings.Contains(err.Error(), "plutil: no answer") {
+		t.Fatal(err)
+	}
+	if got := sources(learner.Endpoints(l.now)); got["45.67.89.20:443/tcp"] != "connection: ExampleVPN" {
+		t.Fatal(got)
+	}
+}
+
+func TestUnansweredLsofReported(t *testing.T) {
+	l := newLearning(t)
+	learner := l.learner(func(args []string) Result {
+		if args[0] == "lsof" {
+			return Result{Err: errors.New("lsof: killed"), Code: -1}
+		}
+		return l.connections(args)
+	}, func(string) (string, error) { return "com.example.vpn.tunnel", nil })
+	tunnel := &TunnelState{Interface: "utun5", Services: []string{"ExampleVPN"}}
+	if err := learner.ScanConnections(home, tunnel, nil, l.now); err == nil {
+		t.Fatal("an unanswered lsof was not reported")
+	}
+}
+
+func TestBadLsofProcessID(t *testing.T) {
+	if rows, err := LsofConnections("pnot-a-number\ncX\n"); err == nil {
+		t.Fatal(rows)
 	}
 }

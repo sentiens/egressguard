@@ -15,7 +15,9 @@ jobs:
       - name: Lint and test (gofmt, go vet, shellcheck, go test -race)
         run: make test GOTOOLCHAIN=auto
       - name: staticcheck
-        run: go run honnef.co/go/tools/cmd/staticcheck@latest -checks all ./...
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 -checks all ./...
+      - name: errcheck (no error goes unchecked, type assertions included)
+        run: go run github.com/kisielk/errcheck@v1.20.0 -asserts ./...
       - name: Build the binary and the menu bar app
         run: make GOTOOLCHAIN=auto
       - name: Stage an install

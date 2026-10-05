@@ -12,9 +12,40 @@ let statusURL = URL(fileURLWithPath: "/Library/Application Support/EgressGuard/s
 
 // MARK: - Files
 
-func readJSON(_ url: URL) -> [String: Any]? {
-    guard let data = try? Data(contentsOf: url) else { return nil }
-    return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+/// A file that is not what it should be.
+struct FileProblem: LocalizedError {
+    let description: String
+    var errorDescription: String? { description }
+}
+
+/// The JSON object in the file at url; nil if there is no such file.
+func readJSON(_ url: URL) throws -> [String: Any]? {
+    let data: Data
+    do {
+        data = try Data(contentsOf: url)
+    } catch CocoaError.fileReadNoSuchFile {
+        return nil
+    }
+    guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        throw FileProblem(description: "\(url.lastPathComponent) is not a JSON object")
+    }
+    return object
+}
+
+/// The list under key in json, empty if absent; anything but such a list is an error.
+func list<Element>(_ json: [String: Any], _ key: String) throws -> [Element] {
+    guard let value = json[key] else { return [] }
+    guard let items = value as? [Element] else { throw FileProblem(description: "\(key) is not a list, or has an entry of the wrong kind") }
+    return items
+}
+
+/// When the file at url last changed; nil if there is no such file.
+func modified(_ url: URL) throws -> Date? {
+    do {
+        return try FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date
+    } catch CocoaError.fileReadNoSuchFile {
+        return nil
+    }
 }
 
 /// Replaces the file at url with value as JSON; returns what went wrong, if anything.
@@ -60,7 +91,14 @@ struct Status {
 
 func readStatus() -> Status {
     var result = Status()
-    guard let json = readJSON(statusURL) else { return result }
+    let json: [String: Any]
+    do {
+        guard let found = try readJSON(statusURL) else { return result } // no daemon: stale
+        json = found
+    } catch {
+        result.problems.append("\(statusURL.path): \(error.localizedDescription)")
+        return result
+    }
     result.state = json["state"] as? String ?? "unknown"
     result.mode = json["mode"] as? String ?? "on"
     result.until = json["until"] as? Double
@@ -179,43 +217,40 @@ final class SettingsModel: ObservableObject {
     }
 
     func load() {
-        let json = readJSON(url) ?? [:]
-        networks = (json["trusted_networks"] as? [[String: Any]] ?? []).map { TrustedNetwork(json: $0) }
-        endpoints = json["endpoints"] as? [String] ?? []
-        learnVPN = json["learn_vpn_services"] as? Bool ?? true
-        learnConnections = json["learn_connections"] as? Bool ?? false
-        vpnOnly = json["vpn_only"] as? Bool ?? false
+        do {
+            let json = try readJSON(url) ?? [:]
+            networks = try list(json, "trusted_networks").map { TrustedNetwork(json: $0) }
+            endpoints = try list(json, "endpoints")
+            learnVPN = json["learn_vpn_services"] as? Bool ?? true
+            learnConnections = json["learn_connections"] as? Bool ?? false
+            vpnOnly = json["vpn_only"] as? Bool ?? false
+        } catch {
+            saveError = "\(url.lastPathComponent) cannot be read: \(error.localizedDescription); fix or delete it"
+        }
     }
 
     /// Applies one change to the settings file as it is now, so edits made elsewhere
     /// (the CLI) are kept and settings the user never touched stay unset. If the file
     /// changes meanwhile, the change is applied again; a file that is not a JSON
     /// object is never overwritten.
-    func update(_ change: (inout [String: Any]) -> Void) {
+    func update(_ change: (inout [String: Any]) throws -> Void) {
         defer {
-            load()
+            if saveError == nil { load() }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.status = readStatus() }
         }
-        for _ in 0..<3 {
-            let before = modified(url)
-            var json: [String: Any] = ["version": 1]
-            if FileManager.default.fileExists(atPath: url.path) {
-                guard let current = readJSON(url) else {
-                    saveError = "\(url.lastPathComponent) is not a JSON object; fix or delete it (nothing was changed)"
-                    return
-                }
-                json = current
+        do {
+            for _ in 0..<3 {
+                let before = try modified(url)
+                var json = try readJSON(url) ?? ["version": 1]
+                try change(&json)
+                guard try modified(url) == before else { continue }
+                saveError = writeAtomically(json, to: url)
+                return
             }
-            change(&json)
-            guard modified(url) == before else { continue }
-            saveError = writeAtomically(json, to: url)
-            return
+            saveError = "\(url.lastPathComponent) keeps changing; try again"
+        } catch {
+            saveError = "\(url.lastPathComponent): \(error.localizedDescription); fix or delete it (nothing was changed)"
         }
-        saveError = "\(url.lastPathComponent) keeps changing; try again"
-    }
-
-    private func modified(_ url: URL) -> Date? {
-        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
     }
 
     func setting(_ key: String) -> Binding<Bool> {
@@ -239,13 +274,13 @@ final class SettingsModel: ObservableObject {
         let typed = newName.trimmingCharacters(in: .whitespaces)
         let network: [String: Any] = ["name": typed.isEmpty ? "Network \(uplink.router)" : typed,
                                       "router": uplink.router, "router_mac": mac]
-        update { $0["trusted_networks"] = ($0["trusted_networks"] as? [[String: Any]] ?? []) + [network] }
+        update { $0["trusted_networks"] = try list($0, "trusted_networks") as [[String: Any]] + [network] }
         newName = ""
     }
 
     func remove(_ network: TrustedNetwork) {
         update { json in
-            json["trusted_networks"] = (json["trusted_networks"] as? [[String: Any]] ?? []).filter { !network.matches($0) }
+            json["trusted_networks"] = try (list(json, "trusted_networks") as [[String: Any]]).filter { !network.matches($0) }
         }
     }
 
@@ -257,7 +292,7 @@ final class SettingsModel: ObservableObject {
         }
         let full = "\(text)/\(newProto)"
         update { json in
-            let current = json["endpoints"] as? [String] ?? []
+            let current: [String] = try list(json, "endpoints")
             if !current.contains(full) { json["endpoints"] = current + [full] }
         }
         newEndpoint = ""
@@ -265,7 +300,7 @@ final class SettingsModel: ObservableObject {
     }
 
     func removeEndpoint(_ endpoint: String) {
-        update { $0["endpoints"] = ($0["endpoints"] as? [String] ?? []).filter { $0 != endpoint } }
+        update { $0["endpoints"] = try (list($0, "endpoints") as [String]).filter { $0 != endpoint } }
     }
 
     var vpnProfileCount: Int { status.endpoints.filter { $0.source.contains("vpn: ") }.count }

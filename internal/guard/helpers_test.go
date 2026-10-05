@@ -1,6 +1,7 @@
 package guard
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +18,36 @@ func TestMain(m *testing.M) {
 }
 
 const homeMAC = "02:00:5e:10:00:01"
+
+// must fails the test on an error from its setup.
+func must(t testing.TB, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeFile writes a test file.
+func writeFile(t testing.TB, path, data string) {
+	t.Helper()
+	must(t, os.WriteFile(path, []byte(data), 0o644))
+}
+
+// readFile is a test file's content.
+func readFile(t testing.TB, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	must(t, err)
+	return string(data)
+}
+
+// marshal is value as JSON.
+func marshal(t testing.TB, value any) []byte {
+	t.Helper()
+	data, err := json.Marshal(value)
+	must(t, err)
+	return data
+}
 
 var (
 	networks = []Network{

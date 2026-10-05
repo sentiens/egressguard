@@ -3,9 +3,9 @@ package guard
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -61,11 +61,11 @@ func (h *harness) make(config Config, change func(*System)) *Daemon {
 	sys := System{
 		Filter:     h.pf,
 		Observe:    h.observe,
-		Tunnel:     func() *TunnelState { return nil },
+		Tunnel:     func() (*TunnelState, error) { return nil, nil },
 		Wall:       func() float64 { return c.wall },
 		Awake:      func() float64 { return c.awake },
 		Asleep:     func() float64 { return c.asleep },
-		Idle:       func() (float64, bool) { return c.idle, true },
+		Idle:       func() (float64, error) { return c.idle, nil },
 		Publish:    func(status Status) { h.statuses = append(h.statuses, status) },
 		LoadConfig: LoadConfig,
 	}
@@ -84,11 +84,10 @@ func (h *harness) observe(config Config, refresh bool) (map[string]Link, error) 
 	return h.uplinks, nil
 }
 
-func (h *harness) mode(value string) { os.WriteFile(h.control, []byte(value), 0o644) }
+func (h *harness) mode(value string) { writeFile(h.t, h.control, value) }
 
 func (h *harness) settings(value any) {
-	data, _ := json.Marshal(value)
-	os.WriteFile(filepath.Join(h.dir, "settings.json"), data, 0o644)
+	writeFile(h.t, filepath.Join(h.dir, "settings.json"), string(marshal(h.t, value)))
 }
 
 func (h *harness) last() Status { return h.statuses[len(h.statuses)-1] }
@@ -362,10 +361,11 @@ func TestStatusJSONForTheMenuApp(t *testing.T) {
 	h := newHarness(t)
 	h.uplinks = map[string]Link{"en0": home["en0"], "en5": {Router: "10.0.0.1", V4: []string{"10.0.0.5/24"}}}
 	h.daemon.Step(nil)
-	data, _ := json.Marshal(h.last())
 	var value map[string]any
-	json.Unmarshal(data, &value)
-	en5 := value["uplinks"].(map[string]any)["en5"].(map[string]any)
+	must(t, json.Unmarshal(marshal(t, h.last()), &value))
+	var uplinks struct{ En5 map[string]any }
+	must(t, json.Unmarshal(marshal(t, value["uplinks"]), &uplinks))
+	en5 := uplinks.En5
 	if en5["mac"] != nil || en5["network"] != nil || en5["router"] != "10.0.0.1" || en5["trusted"] != false {
 		t.Fatal(en5)
 	}
@@ -554,5 +554,17 @@ func TestFailedCloseIsRetriedBeforeLooking(t *testing.T) {
 	if len(h.pf.journal) < 2 || h.pf.journal[0] != "load en0 open=false" || !slices.Contains(h.pf.journal, "observe") ||
 		slices.Index(h.pf.journal, "observe") < 1 {
 		t.Fatal(h.pf.journal)
+	}
+}
+
+func TestUncheckedTunnelReportedAndClosed(t *testing.T) {
+	h := newHarness(t)
+	h.uplinks = cafe
+	h.daemon = h.make(h.config(), func(sys *System) {
+		sys.Tunnel = func() (*TunnelState, error) { return nil, errors.New("netstat: no answer") }
+	})
+	h.expect(nil, StateBlocked)
+	if !h.hasError("the tunnel was not checked: netstat: no answer") {
+		t.Fatal(h.last().Errors)
 	}
 }

@@ -1,6 +1,7 @@
 package guard
 
 import (
+	"errors"
 	"slices"
 	"testing"
 )
@@ -132,5 +133,27 @@ func TestWakeWithoutASealStillRechecks(t *testing.T) {
 	h.daemon.Step(wakeUp())
 	if h.lastObserved() != fresh {
 		t.Fatal(h.observed)
+	}
+}
+
+func TestUnreadableInputStaysSealedUntilAWake(t *testing.T) {
+	h := newHarness(t)
+	h.daemon = h.make(h.config(), func(sys *System) {
+		sys.Idle = func() (float64, error) { return 0, errors.New("ioreg: no answer") }
+	})
+	h.daemon.Step(nil)
+	h.daemon.Seal()
+	h.clocks.sleep(600)
+	h.uplinks = home2
+	h.clocks.touch()
+	h.clocks.advance(1)
+	h.expect(nil, StateBlocked)
+	if !h.hasError("keyboard and mouse input not read, so only a wake notice unseals: ioreg: no answer") {
+		t.Fatal(h.last().Errors)
+	}
+	h.clocks.advance(1)
+	h.expect(wakeUp(), StateTrusted)
+	if h.hasError("keyboard and mouse input") {
+		t.Fatal("the problem outlived the seal")
 	}
 }

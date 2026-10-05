@@ -52,8 +52,7 @@ func ParseEndpoint(value any, where string) (Endpoint, error) {
 		}
 		host, port, hasPort = spec[1:closing], strings.TrimPrefix(rest, ":"), rest != ""
 	case strings.Count(spec, ":") == 1:
-		host, port, _ = strings.Cut(spec, ":")
-		hasPort = true
+		host, port, hasPort = strings.Cut(spec, ":")
 	}
 	address, err := netip.ParseAddr(host)
 	if err != nil || address.Zone() != "" {

@@ -117,7 +117,7 @@ func (d *Daemon) status(control Control, view map[string]Link, trust bool, endpo
 // notes are the standing problems worth reporting with every status. Hold d.mu.
 func (d *Daemon) notes() []string {
 	var notes []string
-	for _, note := range []string{d.configError, d.settingsError, d.sealNote} {
+	for _, note := range []string{d.configError, d.settingsError, d.sealNote, d.idleProblem} {
 		if note != "" {
 			notes = append(notes, note)
 		}
@@ -181,7 +181,7 @@ func WriteStatus(path string, status Status) error {
 	if err != nil {
 		return err
 	}
-	return writeAtomically(path, append(data, '\n'))
+	return WriteAtomically(path, append(data, '\n'))
 }
 
 func optional(text string) *string {

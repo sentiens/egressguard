@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/sentiens/egressguard/internal/guard"
@@ -36,24 +37,63 @@ func testApp(t *testing.T) (*app, *bytes.Buffer) {
 		uplinks: func() (map[string]guard.Link, error) {
 			return map[string]guard.Link{"en0": {Router: "192.168.1.1", MAC: homeMAC}, "en7": {Router: "10.0.0.1"}}, nil
 		},
-		home:      func() string { return filepath.Join(dir, "home") },
+		home:      func() (string, error) { return filepath.Join(dir, "home"), nil },
 		pollEvery: time.Millisecond,
+		confirm:   time.Second,
 	}
 	return a, &out
 }
 
+// must fails the test on an error from its setup.
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeFile writes a test file, making its directory.
+func writeFile(t *testing.T, path string, data string) {
+	t.Helper()
+	must(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	must(t, os.WriteFile(path, []byte(data), 0o644))
+}
+
 func readJSON(t *testing.T, path string) map[string]any {
 	t.Helper()
-	value := readUserJSON(path)
-	if value == nil {
-		t.Fatalf("%s: no JSON object", path)
+	value, err := readUserJSON(path)
+	if err != nil || value == nil {
+		t.Fatalf("%s: no JSON object: %v", path, err)
 	}
 	return value
 }
 
+// networkNames are the names of the trusted networks in settings.
+func networkNames(t *testing.T, settings map[string]any) []string {
+	t.Helper()
+	var parsed struct {
+		Networks []struct{ Name string } `json:"trusted_networks"`
+	}
+	data, err := json.Marshal(settings)
+	must(t, err)
+	must(t, json.Unmarshal(data, &parsed))
+	var names []string
+	for _, network := range parsed.Networks {
+		names = append(names, network.Name)
+	}
+	return names
+}
+
+func settingsPath(t *testing.T, a *app) string {
+	t.Helper()
+	path, err := a.settingsPath()
+	must(t, err)
+	return path
+}
+
 func writeStatus(t *testing.T, a *app, status guard.Status) {
 	t.Helper()
-	os.MkdirAll(filepath.Dir(a.statusPath), 0o755)
+	must(t, os.MkdirAll(filepath.Dir(a.statusPath), 0o755))
 	status.Updated = time.Now().Unix()
 	if err := guard.WriteStatus(a.statusPath, status); err != nil {
 		t.Fatal(err)
@@ -68,28 +108,27 @@ func TestTrustCurrentAddsOnce(t *testing.T) {
 	if err := a.trustCurrent("Again", false); err != nil {
 		t.Fatal(err)
 	}
-	settings := readJSON(t, a.settingsPath())
+	settings := readJSON(t, settingsPath(t, a))
 	want := []any{map[string]any{"name": "Home", "router": "192.168.1.1", "router_mac": homeMAC}}
 	if !reflect.DeepEqual(settings["trusted_networks"], want) {
 		t.Fatal(settings["trusted_networks"])
 	}
 	// What the CLI writes, the daemon accepts.
-	if _, err := guard.LoadSettings(a.settingsPath()); err != nil {
+	if _, err := guard.LoadSettings(settingsPath(t, a)); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestTrustCurrentKeepsOtherSettings(t *testing.T) {
 	a, _ := testApp(t)
-	os.MkdirAll(filepath.Dir(a.settingsPath()), 0o755)
-	os.WriteFile(a.settingsPath(), []byte(`{"endpoints": ["203.0.113.9:51820/udp"], "vpn_only": true}`), 0o644)
-	a.trustCurrent("", false)
-	settings := readJSON(t, a.settingsPath())
+	writeFile(t, settingsPath(t, a), `{"endpoints": ["203.0.113.9:51820/udp"], "vpn_only": true}`)
+	must(t, a.trustCurrent("", false))
+	settings := readJSON(t, settingsPath(t, a))
 	if !reflect.DeepEqual(settings["endpoints"], []any{"203.0.113.9:51820/udp"}) || settings["vpn_only"] != true {
 		t.Fatal(settings)
 	}
-	if name := settings["trusted_networks"].([]any)[0].(map[string]any)["name"]; name != "Network 192.168.1.1" {
-		t.Fatal(name)
+	if networks := networkNames(t, settings); !reflect.DeepEqual(networks, []string{"Network 192.168.1.1"}) {
+		t.Fatal(networks)
 	}
 }
 
@@ -102,17 +141,52 @@ func TestTrustCurrentAsks(t *testing.T) {
 	if !strings.Contains(out.String(), "Trust the network on en0") {
 		t.Fatal(out.String())
 	}
-	networks := readJSON(t, a.settingsPath())["trusted_networks"].([]any)
-	if networks[0].(map[string]any)["name"] != "Office" {
+	if networks := networkNames(t, readJSON(t, settingsPath(t, a))); !reflect.DeepEqual(networks, []string{"Office"}) {
 		t.Fatal(networks)
 	}
-	declined, _ := testApp(t)
-	declined.stdin = strings.NewReader("n\n")
-	declined.trustCurrent("", true)
-	if readUserJSON(declined.settingsPath()) != nil {
-		t.Fatal("trusted without a yes")
+	for _, answer := range []string{"n\n", ""} { // a no, or no answer at all
+		declined, _ := testApp(t)
+		declined.stdin = strings.NewReader(answer)
+		must(t, declined.trustCurrent("", true))
+		if settings, err := readUserJSON(settingsPath(t, declined)); settings != nil || err != nil {
+			t.Fatal("trusted without a yes:", settings, err)
+		}
 	}
 }
+
+func TestTrustCurrentRefusesMalformedNetworks(t *testing.T) {
+	for _, settings := range []string{`{"trusted_networks": "home"}`, `{"trusted_networks": ["home"]}`} {
+		a, _ := testApp(t)
+		writeFile(t, settingsPath(t, a), settings)
+		if err := a.trustCurrent("Home", false); err == nil {
+			t.Fatalf("%s: accepted", settings)
+		}
+		data, err := os.ReadFile(settingsPath(t, a))
+		if err != nil || string(data) != settings {
+			t.Fatal("overwritten:", string(data), err)
+		}
+	}
+}
+
+func TestPromptFailureReported(t *testing.T) {
+	a, _ := testApp(t)
+	a.stdin = iotest.ErrReader(errors.New("the terminal is gone"))
+	if err := a.trustCurrent("", true); err == nil || !strings.Contains(err.Error(), "the terminal is gone") {
+		t.Fatal(err)
+	}
+}
+
+func TestOutputFailureReported(t *testing.T) {
+	a, _ := testApp(t)
+	a.stdout = failingWriter{}
+	if err := a.run([]string{"version"}); err == nil || !strings.Contains(err.Error(), "could not be written") {
+		t.Fatal(err)
+	}
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("closed") }
 
 func TestTrustCurrentWithoutAKnownMAC(t *testing.T) {
 	a, out := testApp(t)
@@ -126,15 +200,19 @@ func TestTrustCurrentWithoutAKnownMAC(t *testing.T) {
 }
 
 func TestResourcesFoundInACheckout(t *testing.T) {
-	root, _ := filepath.Abs("../..")
+	root, err := filepath.Abs("../..")
+	must(t, err)
 	a, _ := testApp(t)
 	a.executable = filepath.Join(root, "build", "egressguard")
 	script, config, err := a.installFiles()
 	if err != nil || script != filepath.Join(root, "scripts/setup.sh") || config != filepath.Join(root, "config/config.json") {
 		t.Fatal(script, config, err)
 	}
-	if got := a.resource("../scripts/uninstall.sh"); got != filepath.Join(root, "scripts/uninstall.sh") {
-		t.Fatal(got)
+	if got, err := a.resource("../scripts/uninstall.sh"); err != nil || got != filepath.Join(root, "scripts/uninstall.sh") {
+		t.Fatal(got, err)
+	}
+	if got, err := a.resource("../no-such-file"); err != nil || got != "" {
+		t.Fatal(got, err)
 	}
 }
 
@@ -142,8 +220,7 @@ func TestResourcesFoundInAHomebrewPrefix(t *testing.T) {
 	prefix := filepath.Join(t.TempDir(), "Cellar", "egressguard", "0.1.0")
 	for _, path := range []string{"bin/egressguard", "libexec/setup.sh", "share/egressguard/config.json",
 		"EgressGuard.app/Contents/Info.plist", "../../../opt/egressguard/EgressGuard.app/Contents/Info.plist"} {
-		os.MkdirAll(filepath.Join(prefix, filepath.Dir(path)), 0o755)
-		os.WriteFile(filepath.Join(prefix, path), nil, 0o755)
+		writeFile(t, filepath.Join(prefix, path), "")
 	}
 	a, _ := testApp(t)
 	a.executable = filepath.Join(prefix, "bin", "egressguard")
@@ -152,21 +229,34 @@ func TestResourcesFoundInAHomebrewPrefix(t *testing.T) {
 		t.Fatal(script, config, err)
 	}
 	// The login item points at the opt path, which survives upgrades.
-	if app := a.menuApp(); !strings.HasSuffix(app, "/opt/egressguard/EgressGuard.app") {
-		t.Fatal(app)
+	if app, err := a.menuApp(); err != nil || !strings.HasSuffix(app, "/opt/egressguard/EgressGuard.app") {
+		t.Fatal(app, err)
 	}
 }
 
-func TestControlPathFromConfig(t *testing.T) {
+func TestControlPath(t *testing.T) {
 	a, _ := testApp(t)
-	os.MkdirAll(filepath.Dir(a.configPath), 0o755)
-	os.WriteFile(a.configPath, []byte(`{"control": "/Users/someone/c.json"}`), 0o644)
-	if got := a.controlPath(); got != "/Users/someone/c.json" {
-		t.Fatal(got)
+	home, err := a.home()
+	must(t, err)
+	// Before setup there is no daemon config: the default control file.
+	if got, err := a.controlPath(); err != nil || got != filepath.Join(home, "Library/Application Support/EgressGuard/control.json") {
+		t.Fatal(got, err)
 	}
-	os.WriteFile(a.configPath, []byte("broken"), 0o644)
-	if got := a.controlPath(); got != filepath.Join(a.home(), "Library/Application Support/EgressGuard/control.json") {
-		t.Fatal(got)
+	writeFile(t, a.configPath, `{"control": "/Users/someone/c.json"}`)
+	if got, err := a.controlPath(); err != nil || got != "/Users/someone/c.json" {
+		t.Fatal(got, err)
+	}
+	// A config that cannot be read never silently becomes some other file.
+	for _, config := range []string{"broken", `{"control": "c.json"}`} {
+		writeFile(t, a.configPath, config)
+		if got, err := a.controlPath(); err == nil {
+			t.Fatalf("%s: %s", config, got)
+		}
+	}
+	a.home = func() (string, error) { return "", errors.New("no home") }
+	must(t, os.Remove(a.configPath))
+	if _, err := a.controlPath(); err == nil {
+		t.Fatal("a missing home was not reported")
 	}
 }
 
@@ -176,9 +266,11 @@ func TestTurnOffForAWhile(t *testing.T) {
 	if err := a.run([]string{"off", "15"}); err != nil {
 		t.Fatal(err)
 	}
-	control := readJSON(t, a.controlPath())
-	until, _ := control["until"].(float64)
-	if control["mode"] != "off" || until < float64(time.Now().Unix()+14*60) {
+	path, err := a.controlPath()
+	must(t, err)
+	control := readJSON(t, path)
+	until, isNumber := control["until"].(float64)
+	if control["mode"] != "off" || !isNumber || until < float64(time.Now().Unix()+14*60) {
 		t.Fatal(control)
 	}
 	if !strings.Contains(out.String(), "egressguard: off") {
@@ -196,6 +288,21 @@ func TestStatusWithoutADaemon(t *testing.T) {
 	a, out := testApp(t)
 	if err := a.run(nil); !errors.Is(err, exitStatus(1)) || !strings.Contains(out.String(), "does not answer") {
 		t.Fatal(err, out.String())
+	}
+}
+
+func TestMalformedStatusReported(t *testing.T) {
+	a, out := testApp(t)
+	writeFile(t, a.statusPath, "{broken")
+	if err := a.run(nil); !errors.Is(err, exitStatus(1)) || !strings.Contains(out.String(), "status.json") {
+		t.Fatal(err, out.String())
+	}
+}
+
+func TestTurnWithoutADaemonFails(t *testing.T) {
+	a, _ := testApp(t)
+	if err := a.run([]string{"off"}); err == nil || !strings.Contains(err.Error(), "did not confirm") {
+		t.Fatal(err)
 	}
 }
 
@@ -229,16 +336,16 @@ func TestWriteUserJSONMakesDirectories(t *testing.T) {
 	if err := writeUserJSON(path, map[string]any{"mode": "on", "note": "<&>"}); err != nil {
 		t.Fatal(err)
 	}
-	data, _ := os.ReadFile(path)
-	if !strings.Contains(string(data), `"<&>"`) {
-		t.Fatal(string(data))
+	data, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(data), `"<&>"`) {
+		t.Fatal(string(data), err)
 	}
-	if info, _ := os.Stat(path); info.Mode().Perm() != 0o644 {
-		t.Fatal(info.Mode())
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o644 {
+		t.Fatal(info, err)
 	}
-	entries, _ := os.ReadDir(filepath.Dir(path))
-	if len(entries) != 1 {
-		t.Fatal("a temporary file is left behind")
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil || len(entries) != 1 {
+		t.Fatal("a temporary file is left behind:", entries, err)
 	}
 }
 
@@ -246,8 +353,8 @@ func TestParseLeakArgs(t *testing.T) {
 	if seconds, safari, err := parseLeakArgs([]string{"30", "--safari"}); seconds != 30 || !safari || err != nil {
 		t.Fatal(seconds, safari, err)
 	}
-	if seconds, _, _ := parseLeakArgs(nil); seconds != 20 {
-		t.Fatal(seconds)
+	if seconds, safari, err := parseLeakArgs(nil); seconds != 20 || safari || err != nil {
+		t.Fatal(seconds, safari, err)
 	}
 	for _, args := range [][]string{{"4"}, {"301"}, {"x"}} {
 		if _, _, err := parseLeakArgs(args); err == nil {
@@ -264,7 +371,10 @@ func ipv4Frame(src, dst string, proto byte, body []byte) []byte {
 	from, to := netip.MustParseAddr(src).As4(), netip.MustParseAddr(dst).As4()
 	packet := append([]byte{0x45, 0, 0, byte(20 + len(body)), 0, 0, 0, 0, 64, proto, 0, 0}, from[:]...)
 	packet = append(append(packet, to[:]...), body...)
-	mac, _ := net.ParseMAC(myMAC)
+	mac, err := net.ParseMAC(myMAC)
+	if err != nil {
+		panic(err) // a constant
+	}
 	return append(append(append(make([]byte, 6), mac...), 0x08, 0x00), packet...)
 }
 
@@ -328,41 +438,46 @@ func TestStatusFileIsWhatTheDaemonWrites(t *testing.T) {
 	a, _ := testApp(t)
 	writeStatus(t, a, guard.Status{State: guard.StateTunnel, Mode: guard.ModeOn, Enforced: true,
 		Tunnel: &guard.TunnelState{Interface: "utun4", Services: []string{"home-wg"}}})
-	status := a.readStatus()
-	if status == nil || status.Age > 5*time.Second || !strings.Contains(describe(status), "through the tunnel (home-wg)") {
-		t.Fatal(status)
+	status, err := a.readStatus()
+	if err != nil || status.Age > 5*time.Second || !strings.Contains(describe(status), "through the tunnel (home-wg)") {
+		t.Fatal(status, err)
 	}
-	var raw map[string]any
-	data, _ := os.ReadFile(a.statusPath)
-	json.Unmarshal(data, &raw)
-	if raw["tunnel"].(map[string]any)["interface"] != "utun4" {
+	var raw struct{ Tunnel map[string]any }
+	data, err := os.ReadFile(a.statusPath)
+	must(t, err)
+	must(t, json.Unmarshal(data, &raw))
+	if raw.Tunnel["interface"] != "utun4" {
 		t.Fatal(raw)
 	}
 }
 
 func TestUpdateUserJSONKeepsAMalformedFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
-	os.WriteFile(path, []byte("{broken"), 0o644)
-	err := updateUserJSON(path, map[string]any{}, func(value map[string]any) { value["vpn_only"] = true })
+	writeFile(t, path, "{broken")
+	err := updateUserJSON(path, map[string]any{}, func(value map[string]any) error {
+		value["vpn_only"] = true
+		return nil
+	})
 	if err == nil || !strings.Contains(err.Error(), "not a JSON object") {
 		t.Fatal(err)
 	}
-	if data, _ := os.ReadFile(path); string(data) != "{broken" {
-		t.Fatal("overwritten:", string(data))
+	if data, err := os.ReadFile(path); err != nil || string(data) != "{broken" {
+		t.Fatal("overwritten:", string(data), err)
 	}
 }
 
 func TestUpdateUserJSONReappliesAfterAConcurrentChange(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
-	os.WriteFile(path, []byte(`{"endpoints": []}`), 0o644)
+	writeFile(t, path, `{"endpoints": []}`)
 	calls := 0
-	err := updateUserJSON(path, map[string]any{}, func(value map[string]any) {
+	err := updateUserJSON(path, map[string]any{}, func(value map[string]any) error {
 		calls++
 		if calls == 1 { // the menu bar app writes in between
-			os.WriteFile(path, []byte(`{"vpn_only": true}`), 0o644)
-			os.Chtimes(path, time.Now(), time.Now().Add(time.Second))
+			writeFile(t, path, `{"vpn_only": true}`)
+			must(t, os.Chtimes(path, time.Now(), time.Now().Add(time.Second)))
 		}
 		value["learn_connections"] = true
+		return nil
 	})
 	if err != nil || calls != 2 {
 		t.Fatal(err, calls)

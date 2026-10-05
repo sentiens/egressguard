@@ -2,6 +2,8 @@ package guard
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"maps"
 	"net/netip"
 	"os"
@@ -45,7 +47,7 @@ type Learner struct {
 	path    string
 	run     Runner
 	resolve func(host string) []string
-	bundle  func(path string) string // the bundle ID of an executable
+	bundle  func(path string) (string, error) // the bundle ID of an executable
 
 	saving   sync.Mutex // orders writes of learned.json; taken before mu, never under it
 	mu       sync.Mutex
@@ -55,7 +57,7 @@ type Learner struct {
 }
 
 // NewLearner loads what was learned before from path.
-func NewLearner(path string, run Runner, resolve func(string) []string, bundle func(string) string) *Learner {
+func NewLearner(path string, run Runner, resolve func(string) []string, bundle func(string) (string, error)) *Learner {
 	l := &Learner{path: path, run: run, resolve: resolve, bundle: bundle, services: map[string]string{}}
 	l.entries, l.resolved = loadLearned(path)
 	return l
@@ -106,7 +108,7 @@ func (l *Learner) save() {
 	data, err := json.MarshalIndent(map[string]any{"version": 1, "endpoints": l.entries, "resolved": l.resolved}, "", "  ")
 	l.mu.Unlock()
 	if err == nil {
-		err = writeAtomically(l.path, append(data, '\n'))
+		err = WriteAtomically(l.path, append(data, '\n'))
 	}
 	if err != nil {
 		logf("learned endpoints not saved: %v", err)
@@ -239,7 +241,8 @@ func missingFrom(a, b map[string]string) []string {
 
 // ScanConnections learns, on a trusted uplink, where running tunnel providers
 // connect to at now: the provider of every connected VPN configuration, and the
-// processes named in extraProcesses. Nothing is learned without a tunnel.
+// processes named in extraProcesses. Nothing is learned without a tunnel. What
+// could not be read is returned as an error, after learning from the rest.
 func (l *Learner) ScanConnections(uplinks map[string]Link, tunnel *TunnelState, extraProcesses []string, now float64) error {
 	if tunnel == nil {
 		return nil
@@ -261,24 +264,40 @@ func (l *Learner) ScanConnections(uplinks map[string]Link, tunnel *TunnelState, 
 	if err != nil {
 		return err
 	}
+	var problems []error
 	providers := map[string]string{}
 	for _, service := range services {
-		if service.Connected {
-			if _, provider, err := ServiceDetails(service.ID, l.run); err == nil && provider != "" {
-				providers[provider] = service.Name
-			}
+		if !service.Connected {
+			continue
+		}
+		_, provider, err := ServiceDetails(service.ID, l.run)
+		if err != nil {
+			problems = append(problems, err)
+		} else if provider != "" {
+			providers[provider] = service.Name
 		}
 	}
-	pids := l.providerProcesses(providers, extraProcesses)
+	pids, err := l.providerProcesses(providers, extraProcesses)
+	if err != nil {
+		problems = append(problems, err)
+	}
 	if len(pids) == 0 {
-		return nil
+		return errors.Join(problems...)
 	}
 	var list []string
 	for _, pid := range slices.Sorted(maps.Keys(pids)) {
 		list = append(list, strconv.Itoa(pid))
 	}
-	result := l.run([]string{"lsof", "-nP", "-a", "-i", "-p", strings.Join(list, ","), "-F", "pcPnT"}, "", 0)
-	for _, row := range LsofConnections(result.Stdout) {
+	// lsof exits 1 when a process has no connections: only a missing answer is a failure.
+	result, err := answer(l.run, "lsof", "-nP", "-a", "-i", "-p", strings.Join(list, ","), "-F", "pcPnT")
+	if err != nil {
+		return errors.Join(append(problems, err)...)
+	}
+	rows, err := LsofConnections(result.Stdout)
+	if err != nil {
+		return errors.Join(append(problems, err)...)
+	}
+	for _, row := range rows {
 		name, known := pids[row.PID]
 		localHost, _, okLocal := SplitHostPort(row.Local)
 		host, port, okRemote := SplitHostPort(row.Remote)
@@ -295,18 +314,27 @@ func (l *Learner) ScanConnections(uplinks map[string]Link, tunnel *TunnelState, 
 		endpoint := Endpoint{Address: address.String(), Family: family(address), Port: port, Proto: strings.ToLower(row.Proto)}
 		l.Remember([]string{endpoint.String()}, "connection: "+name, now)
 	}
-	return nil
+	return errors.Join(problems...)
 }
 
 // providerProcesses are the running processes of the given providers (bundle ID →
-// name) and of the extra process names, as pid → the name to credit.
-func (l *Learner) providerProcesses(providers map[string]string, extra []string) map[int]string {
+// name) and of the extra process names, as pid → the name to credit. Extensions
+// whose bundle ID cannot be read are skipped and reported.
+func (l *Learner) providerProcesses(providers map[string]string, extra []string) (map[int]string, error) {
+	ps := l.run([]string{"ps", "-axo", "pid=,comm="}, "", 0)
+	if ps.Failed() {
+		return nil, &Unanswered{Command: "ps -axo pid=,comm=", Err: errors.New(ps.Error())}
+	}
 	pids := map[int]string{}
-	for _, line := range strings.Split(l.run([]string{"ps", "-axo", "pid=,comm="}, "", 0).Stdout, "\n") {
+	var problems []error
+	for _, line := range strings.Split(ps.Stdout, "\n") {
 		pidText, path, found := strings.Cut(strings.TrimSpace(line), " ")
+		if !found {
+			continue // an empty line
+		}
 		pid, err := strconv.Atoi(pidText)
-		if !found || err != nil {
-			continue
+		if err != nil {
+			return nil, fmt.Errorf("ps: bad process id %q", pidText)
 		}
 		path = strings.TrimSpace(path)
 		switch {
@@ -315,10 +343,13 @@ func (l *Learner) providerProcesses(providers map[string]string, extra []string)
 		case strings.HasPrefix(path, "/System/") || strings.HasPrefix(path, "/usr/"):
 			// Apple's own extensions are never VPN providers.
 		case strings.Contains(path, ".appex/") || strings.Contains(path, ".systemextension/"):
-			if name, ok := providers[l.bundle(path)]; ok {
+			bundle, err := l.bundle(path)
+			if err != nil {
+				problems = append(problems, err)
+			} else if name, ok := providers[bundle]; ok {
 				pids[pid] = name
 			}
 		}
 	}
-	return pids
+	return pids, errors.Join(problems...)
 }

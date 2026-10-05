@@ -168,7 +168,7 @@ type Packet struct {
 	SrcMAC       string // lower-case aa:bb:cc:dd:ee:ff
 	Family       string // "inet" or "inet6"
 	Proto        int
-	Src, Dst     string // canonical text (net/netip String())
+	Src, Dst     netip.Addr
 	HasPorts     bool
 	Sport, Dport int
 	HasICMP      bool
@@ -199,8 +199,8 @@ func ParseFrame(frame []byte) *Packet {
 	switch {
 	case ethertype == 0x0800 && len(packet) >= 20:
 		found.Family, found.Proto = "inet", int(packet[9])
-		found.Src = netip.AddrFrom4([4]byte(packet[12:16])).String()
-		found.Dst = netip.AddrFrom4([4]byte(packet[16:20])).String()
+		found.Src = netip.AddrFrom4([4]byte(packet[12:16]))
+		found.Dst = netip.AddrFrom4([4]byte(packet[16:20]))
 		payload = tail(packet, int(packet[0]&0x0f)*4)
 	case ethertype == 0x86dd && len(packet) >= 40:
 		proto := packet[6]
@@ -212,8 +212,8 @@ func ParseFrame(frame []byte) *Packet {
 			proto, payload = payload[0], payload[8:]
 		}
 		found.Family, found.Proto = "inet6", int(proto)
-		found.Src = netip.AddrFrom16([16]byte(packet[8:24])).String()
-		found.Dst = netip.AddrFrom16([16]byte(packet[24:40])).String()
+		found.Src = netip.AddrFrom16([16]byte(packet[8:24]))
+		found.Dst = netip.AddrFrom16([16]byte(packet[24:40]))
 	default:
 		return nil
 	}
@@ -269,8 +269,9 @@ type Endpoint struct {
 // on the local network) or "internet" (a leak).
 func Verdict(p *Packet, endpoints []Endpoint, routers map[string]bool) string {
 	proto, known := protocols[p.Proto]
+	dst := p.Dst.String()
 	for _, e := range endpoints {
-		if known && e.Family == p.Family && e.Address == p.Dst && e.Proto == proto &&
+		if known && e.Family == p.Family && e.Address == dst && e.Proto == proto &&
 			(e.Port == 0 || p.HasPorts && e.Port == p.Dport) {
 			return "allowed"
 		}
@@ -278,8 +279,7 @@ func Verdict(p *Packet, endpoints []Endpoint, routers map[string]bool) string {
 	if p.Family == "inet" && proto == "udp" && p.HasPorts && p.Sport == 68 && p.Dport == 67 {
 		return "allowed"
 	}
-	dst, _ := netip.ParseAddr(p.Dst)
-	if p.Family == "inet" && p.Proto == 1 && p.HasICMP && p.ICMP == 8 && (within(dst, local) || routers[p.Dst]) {
+	if p.Family == "inet" && p.Proto == 1 && p.HasICMP && p.ICMP == 8 && (within(p.Dst, local) || routers[dst]) {
 		return "allowed"
 	}
 	if p.Family == "inet6" && p.Proto == 58 && p.HasICMP {
@@ -290,9 +290,9 @@ func Verdict(p *Packet, endpoints []Endpoint, routers map[string]bool) string {
 	}
 	var isLocal bool
 	if p.Family == "inet" {
-		isLocal = within(dst, local) || dst.IsMulticast() || p.Dst == "255.255.255.255"
+		isLocal = within(p.Dst, local) || p.Dst.IsMulticast() || p.Dst == netip.AddrFrom4([4]byte{255, 255, 255, 255})
 	} else {
-		isLocal = within(dst, local6)
+		isLocal = within(p.Dst, local6)
 	}
 	if isLocal {
 		return "local"

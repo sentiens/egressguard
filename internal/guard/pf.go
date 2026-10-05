@@ -111,7 +111,7 @@ func (pf *PF) heldTokens() ([]string, error) {
 }
 
 func (pf *PF) saveTokens(tokens []string) error {
-	return writeAtomically(pf.tokens, []byte(strings.Join(tokens, "\n")+"\n"))
+	return WriteAtomically(pf.tokens, []byte(strings.Join(tokens, "\n")+"\n"))
 }
 
 func (pf *PF) Attached() (bool, error) {

@@ -104,7 +104,7 @@ func (d *Daemon) saveLastGood(data []byte) {
 	if d.sys.LastGoodPath == "" {
 		return
 	}
-	if err := writeAtomically(d.sys.LastGoodPath, data); err != nil {
+	if err := WriteAtomically(d.sys.LastGoodPath, data); err != nil {
 		logf("last good settings not saved: %v", err)
 	}
 }

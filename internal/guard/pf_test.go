@@ -1,7 +1,6 @@
 package guard
 
 import (
-	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -20,12 +19,12 @@ func TestNewTokenThenOldReleased(t *testing.T) {
 		return done("", 0)
 	}
 	path := filepath.Join(t.TempDir(), "pf-tokens")
-	os.WriteFile(path, []byte("111\n222\n"), 0o644)
+	writeFile(t, path, "111\n222\n")
 	if err := NewPF(run, path).Enable(); err != nil {
 		t.Fatal(err)
 	}
-	if data, _ := os.ReadFile(path); string(data) != "555\n" {
-		t.Fatal(string(data))
+	if data := readFile(t, path); data != "555\n" {
+		t.Fatal(data)
 	}
 	if !reflect.DeepEqual(calls, [][]string{{"pfctl", "-E"}, {"pfctl", "-X", "111"}, {"pfctl", "-X", "222"}}) {
 		t.Fatal(calls)
@@ -40,11 +39,11 @@ func TestUnreleasedTokenIsKept(t *testing.T) {
 		return Result{Stderr: "pfctl: busy", Code: 1}
 	}
 	path := filepath.Join(t.TempDir(), "pf-tokens")
-	os.WriteFile(path, []byte("111\n"), 0o644)
+	writeFile(t, path, "111\n")
 	if err := NewPF(run, path).Enable(); err != nil {
 		t.Fatal(err)
 	}
-	if data, _ := os.ReadFile(path); string(data) != "555\n111\n" {
+	if data := readFile(t, path); data != "555\n111\n" {
 		t.Fatalf("%q", data)
 	}
 }

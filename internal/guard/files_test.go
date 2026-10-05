@@ -1,7 +1,6 @@
 package guard
 
 import (
-	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -11,7 +10,7 @@ import (
 func TestConfigReload(t *testing.T) {
 	h := newHarness(t)
 	path := filepath.Join(h.dir, "config.json")
-	os.WriteFile(path, []byte("{}"), 0o644)
+	writeFile(t, path, "{}")
 	next, broken := h.config(), false
 	h.daemon = h.make(h.config(), func(sys *System) {
 		sys.ConfigPath = path
@@ -31,7 +30,7 @@ func TestConfigReload(t *testing.T) {
 	}
 
 	next.TrustedNetworks = []Network{}
-	os.WriteFile(path, []byte(`{"changed": 1}`), 0o644)
+	writeFile(t, path, `{"changed": 1}`)
 	h.clocks.advance(tick)
 	h.expect(nil, StateBlocked)
 	epoch = h.daemon.epoch
@@ -42,7 +41,7 @@ func TestConfigReload(t *testing.T) {
 	}
 
 	broken = true
-	os.WriteFile(path, []byte(`{"changed": 22}`), 0o644)
+	writeFile(t, path, `{"changed": 22}`)
 	h.clocks.advance(tick)
 	h.daemon.Step(nil)
 	if !h.hasError("config not reloaded: broken") || len(h.daemon.Config().TrustedNetworks) != 0 {
@@ -96,7 +95,7 @@ func TestBadSettingsKeepTheLastGood(t *testing.T) {
 	if !slices.Contains(h.last().Networks, "x") {
 		t.Fatal(h.last().Networks)
 	}
-	os.WriteFile(filepath.Join(h.dir, "settings.json"), []byte(`{"trusted_networks": [{"name": "y", "router": "1.2.3.4"}]}`), 0o644)
+	writeFile(t, filepath.Join(h.dir, "settings.json"), `{"trusted_networks": [{"name": "y", "router": "1.2.3.4"}]}`)
 	h.clocks.advance(1)
 	h.daemon.Step(nil)
 	if !slices.Contains(h.last().Networks, "x") || !h.hasError("router_mac") {
@@ -110,7 +109,7 @@ func TestBadSettingsAtStartUseTheSavedCopy(t *testing.T) {
 	withCopy := func(sys *System) { sys.LastGoodPath = lastGood }
 	h.settings(map[string]any{"trusted_networks": []any{map[string]any{"name": "x", "interface": "en1"}}})
 	h.make(h.config(), withCopy).Step(nil)
-	os.WriteFile(filepath.Join(h.dir, "settings.json"), []byte("broken"), 0o644)
+	writeFile(t, filepath.Join(h.dir, "settings.json"), "broken")
 	h.make(h.config(), withCopy).Step(nil)
 	if !slices.Contains(h.last().Networks, "x") || !h.hasError("settings") {
 		t.Fatalf("%+v", h.last())
@@ -122,7 +121,7 @@ func TestLastGoodIsTheCheckedText(t *testing.T) {
 	lastGood := filepath.Join(h.dir, "last-good.json")
 	h.settings(map[string]any{"trusted_networks": []any{map[string]any{"name": "x", "interface": "en1"}}})
 	h.make(h.config(), func(sys *System) { sys.LastGoodPath = lastGood }).Step(nil)
-	data, _ := os.ReadFile(lastGood)
+	data := []byte(readFile(t, lastGood))
 	if settings, err := ParseSettings(data); err != nil || settings.TrustedNetworks[0].Name != "x" {
 		t.Fatal(err, string(data))
 	}

@@ -15,7 +15,7 @@ func readControlText(t *testing.T, text *string) Control {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "control.json")
 	if text != nil {
-		os.WriteFile(path, []byte(*text), 0o644)
+		writeFile(t, path, *text)
 	}
 	return ReadControl(path, 1000)
 }
@@ -26,7 +26,7 @@ func TestControlMissingOrBadMeansOn(t *testing.T) {
 	}
 	for _, text := range []string{"", "{", "[]", `"off"`, `{"mode": "of"}`, `{"mode": "off", "until": "2000"}`,
 		`{"mode": "off", "until": 1.5}`, `{"mode": "off", "until": true}`, `{"mode": "off", "until": -1}`,
-		`{"mode": "off"} {}`, `{"mode": "off"}` + strings.Repeat(" ", 5000)} {
+		`{"mode": "off"} {}`, `{"mode": "off"}` + strings.Repeat(" ", 5000), `{"mode": 0}`, `{"until": 2000}`} {
 		if mode := readControlText(t, &text).Mode; mode != ModeOn {
 			t.Errorf("%.40q: %s", text, mode)
 		}
@@ -56,8 +56,8 @@ func TestControlLockIsBounded(t *testing.T) {
 
 func TestControlSymlinkRefused(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "target.json"), []byte(`{"mode": "off"}`), 0o644)
-	os.Symlink(filepath.Join(dir, "target.json"), filepath.Join(dir, "control.json"))
+	writeFile(t, filepath.Join(dir, "target.json"), `{"mode": "off"}`)
+	must(t, os.Symlink(filepath.Join(dir, "target.json"), filepath.Join(dir, "control.json")))
 	if mode := ReadControl(filepath.Join(dir, "control.json"), 1000).Mode; mode != ModeOn {
 		t.Fatal(mode)
 	}
@@ -65,9 +65,8 @@ func TestControlSymlinkRefused(t *testing.T) {
 
 func loadConfigValue(t *testing.T, value any) (Config, error) {
 	t.Helper()
-	data, _ := json.Marshal(value)
 	path := filepath.Join(t.TempDir(), "config.json")
-	os.WriteFile(path, data, 0o644)
+	writeFile(t, path, string(marshal(t, value)))
 	return LoadConfig(path)
 }
 
@@ -85,9 +84,8 @@ func TestRepoAndExampleConfigs(t *testing.T) {
 		t.Fatalf("example: %v %+v", err, example)
 	}
 	// The shipped config knows no network and no server: those are the user's settings.
-	data, _ := os.ReadFile("../../config/config.json")
 	path := filepath.Join(t.TempDir(), "config.json")
-	os.WriteFile(path, []byte(strings.ReplaceAll(string(data), "@CONTROL@", "/x")), 0o644)
+	writeFile(t, path, strings.ReplaceAll(readFile(t, "../../config/config.json"), "@CONTROL@", "/x"))
 	config, err := LoadConfig(path)
 	if err != nil || len(config.TrustedNetworks) != 0 || len(config.Tunnels) != 0 {
 		t.Fatalf("shipped: %v %+v", err, config)
@@ -133,6 +131,11 @@ func TestConfigRejected(t *testing.T) {
 		network(map[string]any{"name": "x", "router_mac": "zz"}),
 		network(map[string]any{"name": "x", "router_mac": homeMAC, "pin": "loose"}),
 		network(map[string]any{"name": "x", "router_mac": homeMAC, "router_ip": "1.1.1.1"}),
+		network(map[string]any{"name": json.Number("5"), "router_mac": homeMAC}),
+		network(map[string]any{"name": "x", "router_mac": homeMAC, "pin": true}),
+		network(map[string]any{"name": "x", "interface": json.Number("0")}),
+		{"tunnels": []any{map[string]any{"name": []any{"x"}, "endpoints": []any{"1.2.3.4:51820/udp"}}}},
+		{"control": json.Number("5")},
 		{"tunnels": []any{map[string]any{"name": "x", "endpoints": []any{}}}},
 		tunnel("vpn.example.com:51820/udp"),
 		tunnel("1.2.3.4:51820"),
@@ -213,8 +216,8 @@ func TestFIFOSettingsRefused(t *testing.T) {
 
 func TestSymlinkedSettingsRefused(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "elsewhere.json"), []byte(`{"vpn_only": true}`), 0o644)
-	os.Symlink(filepath.Join(dir, "elsewhere.json"), filepath.Join(dir, "settings.json"))
+	writeFile(t, filepath.Join(dir, "elsewhere.json"), `{"vpn_only": true}`)
+	must(t, os.Symlink(filepath.Join(dir, "elsewhere.json"), filepath.Join(dir, "settings.json")))
 	if _, err := LoadSettings(filepath.Join(dir, "settings.json")); err == nil {
 		t.Fatal("followed a symlink")
 	}
@@ -222,7 +225,7 @@ func TestSymlinkedSettingsRefused(t *testing.T) {
 
 func TestOversizedSettingsRefused(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
-	os.WriteFile(path, []byte(`{"vpn_only": true}`+strings.Repeat(" ", settingsLimit)), 0o644)
+	writeFile(t, path, `{"vpn_only": true}`+strings.Repeat(" ", settingsLimit))
 	if _, err := LoadSettings(path); err == nil || !strings.Contains(err.Error(), "larger than") {
 		t.Fatal(err)
 	}
@@ -230,10 +233,10 @@ func TestOversizedSettingsRefused(t *testing.T) {
 
 func TestFileStampIgnoresReading(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	os.WriteFile(path, []byte("{}"), 0o644)
+	writeFile(t, path, "{}")
 	before := fileStamp(path)
-	os.ReadFile(path)
-	os.Chmod(path, 0o600)
+	readFile(t, path)
+	must(t, os.Chmod(path, 0o600))
 	if after := fileStamp(path); after != before {
 		t.Fatalf("%s != %s", after, before)
 	}

@@ -2,10 +2,14 @@ package guard
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"io"
 	"net"
+	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -67,8 +71,10 @@ func Classify(message string, indexName func(int) (string, bool)) *Event {
 		}
 	}
 	for _, match := range ifIndex.FindAllStringSubmatch(line, -1) {
-		var index int
-		fmt.Sscan(match[1], &index)
+		index, err := strconv.Atoi(match[1])
+		if err != nil {
+			continue // more digits than an index has: not one
+		}
 		if name, ok := indexName(index); ok {
 			names[name] = true
 		}
@@ -174,8 +180,8 @@ func watchRoutes(note func(*Event), stop <-chan struct{}) {
 	}
 }
 
-// readRoutes runs one `route -n monitor` until it ends or stop is closed.
-func readRoutes(note func(*Event), stop <-chan struct{}) error {
+// readRoutes runs one `route -n monitor` until its output ends or stop is closed.
+func readRoutes(note func(*Event), stop <-chan struct{}) (err error) {
 	path, err := ToolPath("route")
 	if err != nil {
 		return err
@@ -190,29 +196,42 @@ func readRoutes(note func(*Event), stop <-chan struct{}) error {
 		return err
 	}
 	done := make(chan struct{})
-	defer close(done)
+	defer func() {
+		close(done)
+		// The output ended or failed: end the monitor, so the next one starts clean.
+		// Exiting by our kill is expected; anything else is reported.
+		if killErr := cmd.Process.Kill(); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
+			err = errors.Join(err, killErr)
+		}
+		var exit *exec.ExitError
+		if waitErr := cmd.Wait(); waitErr != nil && !errors.As(waitErr, &exit) {
+			err = errors.Join(err, waitErr)
+		}
+	}()
 	go func() {
 		select {
 		case <-stop:
-			cmd.Process.Kill()
+			if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+				logf("route monitor not stopped: %v", err)
+			}
 		case <-done:
 		}
 	}()
 	reader := bufio.NewReader(out)
 	var splitter Splitter
 	for {
-		line, err := reader.ReadString('\n')
+		line, readErr := reader.ReadString('\n')
 		if message := splitter.Line(line); message != "" {
 			note(Classify(message, IndexName))
 		}
-		if err != nil {
-			break
+		if readErr != nil {
+			if message := splitter.Rest(); message != "" {
+				note(Classify(message, IndexName))
+			}
+			if errors.Is(readErr, io.EOF) || errors.Is(readErr, os.ErrClosed) {
+				return nil
+			}
+			return readErr
 		}
 	}
-	if message := splitter.Rest(); message != "" {
-		note(Classify(message, IndexName))
-	}
-	cmd.Process.Kill() // the output ended: the monitor is restarted
-	cmd.Wait()
-	return nil
 }

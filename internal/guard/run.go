@@ -27,12 +27,12 @@ func NewSystem(learner EndpointSource) System {
 	return System{
 		Filter:  NewPF(Run, StatePath("pf-tokens")),
 		Observe: func(config Config, refresh bool) (map[string]Link, error) { return Observe(config, refresh, Run, true) },
-		Tunnel:  func() *TunnelState { return TunnelStatus(Run) },
+		Tunnel:  func() (*TunnelState, error) { return TunnelStatus(Run) },
 		Learner: learner,
 		Wall:    wallClock,
 		Awake:   Uptime,
 		Asleep:  AsleepSeconds,
-		Idle:    func() (float64, bool) { return HIDIdle(Run) },
+		Idle:    func() (float64, error) { return HIDIdle(Run) },
 		Publish: func(status Status) {
 			if err := WriteStatus(StatePath("status.json"), status); err != nil {
 				logf("status not written: %v", err)
@@ -97,7 +97,11 @@ func step(d *Daemon, events []*Event) (err error) {
 		if failure := recover(); failure != nil {
 			logf("step failed: %v\n%s", failure, debug.Stack())
 			func() {
-				defer func() { recover() }()
+				defer func() {
+					if again := recover(); again != nil {
+						logf("off fallback failed too: %v", again)
+					}
+				}()
 				d.FallbackOff()
 			}()
 			err = fmt.Errorf("step failed: %v", failure)
@@ -235,7 +239,10 @@ func Check(path string) (CheckResult, error) {
 	if len(message) > 500 {
 		message = message[len(message)-500:]
 	}
-	tunnel := TunnelStatus(Run)
+	tunnel, err := TunnelStatus(Run)
+	if err != nil {
+		return CheckResult{}, err
+	}
 	result := CheckResult{State: StateOf(Control{Mode: ModeOn}, uplinks, tunnel, true),
 		Tunnel: tunnel, Uplinks: map[string]StatusLink{}, SyntaxOK: !syntax.Failed(), SyntaxError: message}
 	for name, link := range uplinks {

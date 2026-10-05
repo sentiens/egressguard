@@ -42,23 +42,28 @@ type usageError string
 func (e usageError) Error() string { return string(e) }
 
 func main() {
-	os.Exit(exitCode(newApp().run(os.Args[1:]), os.Stderr))
+	a, err := newApp()
+	if err == nil {
+		err = a.run(os.Args[1:])
+	}
+	os.Exit(exitCode(err, os.Stderr))
 }
 
 // exitCode reports err on stderr and turns it into the process's exit status.
 func exitCode(err error, stderr io.Writer) int {
 	var status exitStatus
 	var badUsage usageError
+	code := 1
 	switch {
 	case err == nil:
 		return 0
 	case errors.As(err, &status):
-		return int(status)
+		return int(status) // the command has said why
 	case errors.As(err, &badUsage):
-		fmt.Fprintln(stderr, "egressguard:", err)
-		return 2
-	default:
-		fmt.Fprintln(stderr, "egressguard:", err)
-		return 1
+		code = 2
 	}
+	// The last report there is: if stderr is gone, no one is left to tell, and the
+	// status still says the command failed.
+	_, _ = fmt.Fprintln(stderr, "egressguard:", err)
+	return code
 }

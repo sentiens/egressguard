@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,39 +13,55 @@ import (
 )
 
 // resource is the first of candidates (paths relative to this binary) that exists:
-// the Homebrew layout first, then a checkout.
-func (a *app) resource(candidates ...string) string {
+// the Homebrew layout first, then a checkout. "" if none does.
+func (a *app) resource(candidates ...string) (string, error) {
 	here := filepath.Dir(a.executable)
 	for _, candidate := range candidates {
 		path := filepath.Clean(filepath.Join(here, candidate))
-		if _, err := os.Stat(path); err == nil {
-			return path
+		if found, err := exists(path); err != nil || found {
+			return path, err
 		}
 	}
-	return ""
+	return "", nil
+}
+
+// exists reports whether path exists; only "it does not" is an answer, not a failure.
+func exists(path string) (bool, error) {
+	_, err := os.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // installFiles are setup.sh and the config template, next to this binary.
 func (a *app) installFiles() (script, config string, err error) {
-	script = a.resource("../libexec/setup.sh", "../scripts/setup.sh")
-	config = a.resource("../share/egressguard/config.json", "../config/config.json")
+	if script, err = a.resource("../libexec/setup.sh", "../scripts/setup.sh"); err != nil {
+		return "", "", err
+	}
+	if config, err = a.resource("../share/egressguard/config.json", "../config/config.json"); err != nil {
+		return "", "", err
+	}
 	if script == "" || config == "" {
 		return "", "", errors.New("egressguard is not installed completely: setup.sh or config.json is missing")
 	}
 	return script, config, nil
 }
 
-// menuApp is the menu bar app; for Homebrew, its stable opt path, so the login item
-// survives upgrades.
-func (a *app) menuApp() string {
-	app := a.resource("../EgressGuard.app", "EgressGuard.app")
+// menuApp is the menu bar app, or ""; for Homebrew, its stable opt path, so the
+// login item survives upgrades.
+func (a *app) menuApp() (string, error) {
+	app, err := a.resource("../EgressGuard.app", "EgressGuard.app")
+	if err != nil {
+		return "", err
+	}
 	if prefix, _, found := strings.Cut(app, "/Cellar/egressguard/"); found {
 		opt := filepath.Join(prefix, "opt/egressguard/EgressGuard.app")
-		if _, err := os.Stat(opt); err == nil {
-			return opt
+		if found, err := exists(opt); err != nil || found {
+			return opt, err
 		}
 	}
-	return app
+	return app, nil
 }
 
 func (a *app) setup() error {
@@ -54,7 +72,22 @@ func (a *app) setup() error {
 	if err != nil {
 		return err
 	}
-	networks, _ := readUserJSON(a.settingsPath())["trusted_networks"].([]any)
+	menu, err := a.menuApp()
+	if err != nil {
+		return err
+	}
+	path, err := a.settingsPath()
+	if err != nil {
+		return err
+	}
+	settings, err := readUserJSON(path)
+	if err != nil {
+		return err
+	}
+	networks, err := trustedNetworks(settings)
+	if err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
 	if len(networks) == 0 && a.interactive {
 		a.printf("No trusted network yet: on every network the internet would only go through a VPN tunnel.\n")
 		if err := a.trustCurrent("", true); err != nil && !errors.As(err, new(exitStatus)) {
@@ -62,14 +95,17 @@ func (a *app) setup() error {
 		}
 	}
 	return a.runScript(script, "EGRESSGUARD_DAEMON="+a.executable, "EGRESSGUARD_CONFIG="+config,
-		"EGRESSGUARD_APP="+a.menuApp(), "EGRESSGUARD_RELEASE="+guard.Release)
+		"EGRESSGUARD_APP="+menu, "EGRESSGUARD_RELEASE="+guard.Release)
 }
 
 func (a *app) uninstall() error {
 	if os.Geteuid() != 0 {
 		return errors.New("run it as: sudo egressguard uninstall")
 	}
-	script := a.resource("../libexec/uninstall.sh", "../scripts/uninstall.sh")
+	script, err := a.resource("../libexec/uninstall.sh", "../scripts/uninstall.sh")
+	if err != nil {
+		return err
+	}
 	if script == "" {
 		return errors.New("uninstall.sh is missing")
 	}

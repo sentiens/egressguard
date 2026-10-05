@@ -39,6 +39,8 @@ static double continuous_seconds(void) { return clock_seconds(CLOCK_MONOTONIC); 
 import "C"
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"regexp"
 	"runtime"
@@ -111,11 +113,18 @@ func WatchPower(beforeSleep, woke func(), registered func(bool)) {
 var hidIdle = regexp.MustCompile(`"HIDIdleTime" = (\d+)`)
 
 // HIDIdle is the seconds since the last keyboard, mouse or trackpad input.
-func HIDIdle(run Runner) (float64, bool) {
-	match := hidIdle.FindStringSubmatch(run([]string{"ioreg", "-c", "IOHIDSystem", "-r", "-d", "1"}, "", 0).Stdout)
+func HIDIdle(run Runner) (float64, error) {
+	result := run([]string{"ioreg", "-c", "IOHIDSystem", "-r", "-d", "1"}, "", 0)
+	if result.Failed() {
+		return 0, &Unanswered{Command: "ioreg -c IOHIDSystem", Err: errors.New(result.Error())}
+	}
+	match := hidIdle.FindStringSubmatch(result.Stdout)
 	if match == nil {
-		return 0, false
+		return 0, errors.New("ioreg reports no HIDIdleTime")
 	}
 	nanoseconds, err := strconv.ParseFloat(match[1], 64)
-	return nanoseconds / 1e9, err == nil
+	if err != nil {
+		return 0, fmt.Errorf("HIDIdleTime %q: %w", match[1], err)
+	}
+	return nanoseconds / 1e9, nil
 }

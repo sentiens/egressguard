@@ -15,6 +15,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/sentiens/egressguard/internal/guard"
 )
 
 // asInvokingUser runs fn as the user who ran sudo (effective user, group and
@@ -63,26 +65,10 @@ func writeUserJSON(path string, value any) error {
 		return err
 	}
 	return asInvokingUser(func() error {
-		dir := filepath.Dir(path)
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return err
 		}
-		tmp, err := os.CreateTemp(dir, "."+strings.TrimSuffix(filepath.Base(path), ".json")+".")
-		if err != nil {
-			return err
-		}
-		defer os.Remove(tmp.Name())
-		_, err = tmp.Write(buffer.Bytes())
-		if err == nil {
-			err = tmp.Chmod(0o644)
-		}
-		if closeErr := tmp.Close(); err == nil {
-			err = closeErr
-		}
-		if err != nil {
-			return err
-		}
-		return os.Rename(tmp.Name(), path)
+		return guard.WriteAtomically(path, buffer.Bytes())
 	})
 }
 
@@ -90,25 +76,32 @@ func writeUserJSON(path string, value any) error {
 // writes it back. If the file changes meanwhile (the menu bar app), the change is
 // applied again to the new content. A file that is not a JSON object is never
 // overwritten. A missing file starts as fallback.
-func updateUserJSON(path string, fallback map[string]any, change func(map[string]any)) error {
+func updateUserJSON(path string, fallback map[string]any, change func(map[string]any) error) error {
 	// Read as the user too: a path the user controls must not show them what only root may read.
 	return asInvokingUser(func() error { return updateJSON(path, fallback, change) })
 }
 
-func updateJSON(path string, fallback map[string]any, change func(map[string]any)) error {
+func updateJSON(path string, fallback map[string]any, change func(map[string]any) error) error {
 	for range 3 {
-		before := modified(path)
-		value := maps.Clone(fallback)
-		if data, err := os.ReadFile(path); err == nil {
-			value = nil
-			if json.Unmarshal(data, &value) != nil || value == nil {
-				return fmt.Errorf("%s is not a JSON object; fix or delete it (nothing was changed)", path)
-			}
-		} else if !errors.Is(err, fs.ErrNotExist) {
+		before, err := modified(path)
+		if err != nil {
 			return err
 		}
-		change(value)
-		if !modified(path).Equal(before) {
+		value, err := readJSONObject(path)
+		if err != nil {
+			return fmt.Errorf("%w (nothing was changed)", err)
+		}
+		if value == nil {
+			value = maps.Clone(fallback)
+		}
+		if err := change(value); err != nil {
+			return fmt.Errorf("%s: %w (nothing was changed)", path, err)
+		}
+		after, err := modified(path)
+		if err != nil {
+			return err
+		}
+		if !after.Equal(before) {
 			continue
 		}
 		return writeUserJSON(path, value)
@@ -116,11 +109,16 @@ func updateJSON(path string, fallback map[string]any, change func(map[string]any
 	return fmt.Errorf("%s keeps changing; try again", path)
 }
 
-func modified(path string) time.Time {
-	if info, err := os.Stat(path); err == nil {
-		return info.ModTime()
+// modified is when path last changed; the zero time if it does not exist.
+func modified(path string) (time.Time, error) {
+	info, err := os.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return time.Time{}, nil
 	}
-	return time.Time{}
+	if err != nil {
+		return time.Time{}, err
+	}
+	return info.ModTime(), nil
 }
 
 // removeUserFile removes a file of the user's, as the user; a missing file is fine.
@@ -133,17 +131,32 @@ func removeUserFile(path string) error {
 	})
 }
 
-// readUserJSON is the JSON object in a file of the user's, read as the user, or nil.
-func readUserJSON(path string) map[string]any {
+// readUserJSON is the JSON object in a file of the user's, read as the user; nil
+// if the file does not exist.
+func readUserJSON(path string) (map[string]any, error) {
 	var value map[string]any
-	asInvokingUser(func() error {
-		data, err := os.ReadFile(path)
-		if err == nil && json.Unmarshal(data, &value) != nil {
-			value = nil
-		}
-		return nil
+	err := asInvokingUser(func() error {
+		var err error
+		value, err = readJSONObject(path)
+		return err
 	})
-	return value
+	return value, err
+}
+
+// readJSONObject is the JSON object in path; nil if the file does not exist.
+func readJSONObject(path string) (map[string]any, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var value map[string]any
+	if err := json.Unmarshal(data, &value); err != nil || value == nil {
+		return nil, fmt.Errorf("%s is not a JSON object; fix or delete it", path)
+	}
+	return value, nil
 }
 
 // prompter asks questions on a terminal.
@@ -154,16 +167,26 @@ type prompter struct {
 
 func newPrompter(in io.Reader, out io.Writer) *prompter { return &prompter{bufio.NewReader(in), out} }
 
-func (p *prompter) line(question, fallback string) string {
-	fmt.Fprint(p.out, question)
-	answer, _ := p.in.ReadString('\n')
-	if answer = strings.TrimSpace(answer); answer != "" {
-		return answer
+// line asks question; an empty answer, or the end of the input, is fallback.
+func (p *prompter) line(question, fallback string) (string, error) {
+	if _, err := fmt.Fprint(p.out, question); err != nil {
+		return "", err
 	}
-	return fallback
+	answer, err := p.in.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	if answer = strings.TrimSpace(answer); answer != "" {
+		return answer, nil
+	}
+	return fallback, nil
 }
 
-func (p *prompter) yes(question string) bool {
-	answer := strings.ToLower(p.line(question, "no"))
-	return answer == "y" || answer == "yes"
+func (p *prompter) yes(question string) (bool, error) {
+	answer, err := p.line(question, "no")
+	if err != nil {
+		return false, err
+	}
+	answer = strings.ToLower(answer)
+	return answer == "y" || answer == "yes", nil
 }

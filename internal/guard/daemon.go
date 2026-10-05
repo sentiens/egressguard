@@ -24,13 +24,13 @@ const (
 type System struct {
 	Filter     Filter
 	Observe    func(config Config, refresh bool) (map[string]Link, error)
-	Tunnel     func() *TunnelState
-	Learner    EndpointSource         // nil: nothing is learned
-	Wall       func() float64         // seconds since the epoch
-	Awake      func() float64         // seconds awake since boot; stops while the Mac sleeps
-	Asleep     func() float64         // seconds asleep since boot
-	Idle       func() (float64, bool) // seconds since the last keyboard or mouse input
-	Publish    func(Status)           // writes status.json
+	Tunnel     func() (*TunnelState, error)
+	Learner    EndpointSource          // nil: nothing is learned
+	Wall       func() float64          // seconds since the epoch
+	Awake      func() float64          // seconds awake since boot; stops while the Mac sleeps
+	Asleep     func() float64          // seconds asleep since boot
+	Idle       func() (float64, error) // seconds since the last keyboard or mouse input
+	Publish    func(Status)            // writes status.json
 	LoadConfig func(path string) (Config, error)
 
 	ConfigPath   string // the administrator's config, re-read when it changes; "" for none
@@ -78,6 +78,7 @@ type Daemon struct {
 	sealNetworks   map[string]sealedNetwork // the networks trusted when the seal began
 	sleptSinceSeal bool
 	sealNote       string
+	idleProblem    string // why input could not be read while sealed
 	clocksRead     bool
 	sleptSeen      float64 // asleep seconds at the last step
 	lastStep       float64 // awake seconds at the last step
@@ -158,9 +159,14 @@ func (d *Daemon) Step(events []*Event) string {
 // react follows the switch, power events and leaves, and closes the network at
 // once if any of them broke trust.
 func (d *Daemon) react(control Control, events []*Event, now float64) []string {
-	idle, idleKnown := 0.0, false
+	idle, idleKnown, idleProblem := 0.0, false, ""
 	if d.isSealed() {
-		idle, idleKnown = d.sys.Idle() // ioreg, outside the lock
+		var err error // ioreg, outside the lock
+		if idle, err = d.sys.Idle(); err != nil {
+			idleProblem = "keyboard and mouse input not read, so only a wake notice unseals: " + err.Error()
+		} else {
+			idleKnown = true
+		}
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -169,6 +175,10 @@ func (d *Daemon) react(control Control, events []*Event, now float64) []string {
 	}
 	d.mode = control.Mode
 	d.checkPower(events, now, idle, idleKnown)
+	d.idleProblem = ""
+	if d.sealed { // the input matters only while sealed
+		d.idleProblem = idleProblem
+	}
 	for _, event := range events {
 		if event.Kind == EventLeave && !event.Handled && d.affectsTrust(event) {
 			d.breakTrust(event.String() + " changed")
@@ -196,8 +206,9 @@ func (d *Daemon) look(happened bool, now float64) []string {
 
 	uplinks, err := d.sys.Observe(config, refresh)
 	var tunnel *TunnelState
+	var tunnelErr error
 	if uplinks != nil {
-		tunnel = d.sys.Tunnel()
+		tunnel, tunnelErr = d.sys.Tunnel()
 	}
 
 	d.mu.Lock()
@@ -209,6 +220,9 @@ func (d *Daemon) look(happened bool, now float64) []string {
 	if err != nil { // some uplinks did not answer: they stay closed until they do
 		problems = append(problems, fmt.Sprintf("no answer from %v", err))
 		d.followUntil = max(d.followUntil, d.sys.Awake()+follow)
+	}
+	if tunnelErr != nil {
+		problems = append(problems, "the tunnel was not checked: "+tunnelErr.Error())
 	}
 	d.silent = false
 	if epoch != d.epoch {
