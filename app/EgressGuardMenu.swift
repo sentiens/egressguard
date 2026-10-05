@@ -432,7 +432,6 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         menu.addItem(.separator())
         add("Settings…", #selector(openSettings))
-        add("Hide icon (until next login)", #selector(quit))
     }
 
     func add(_ title: String, _ action: Selector) {
@@ -477,7 +476,6 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc func off15() { off(minutes: 15) }
     @objc func off60() { off(minutes: 60) }
     @objc func offForever() { off(minutes: nil) }
-    @objc func quit() { NSApp.terminate(nil) }
 }
 
 #if !EGRESSGUARD_PREVIEW // the preview build renders the settings window to a picture instead
